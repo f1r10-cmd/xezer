@@ -119,12 +119,21 @@ class TestFindings:
     def test_set_finding_status(self, tmp_db):
         hid = tmp_db.upsert_host("a.example.com", status_code=200)
         fid = tmp_db.insert_finding(hid, "m", "high", "t1")
-        tmp_db.set_finding_status(fid, "false-positive", confidence=0.1)
+        tmp_db.set_finding_status(fid, "rejected", confidence=0.1)
         row = tmp_db.get_db().execute(
             "SELECT status, confidence FROM findings WHERE id=?", (fid,)
         ).fetchone()
-        assert row["status"] == "false-positive"
+        assert row["status"] == "rejected"
         assert row["confidence"] == 0.1
+
+    def test_legacy_status_normalized(self, tmp_db):
+        """Köhnə status adları yeni həyat dövrünə çevrilir."""
+        hid = tmp_db.upsert_host("a.example.com", status_code=200)
+        fid = tmp_db.insert_finding(hid, "m", "high", "t1")
+        tmp_db.set_finding_status(fid, "false-positive")
+        row = tmp_db.get_db().execute(
+            "SELECT status FROM findings WHERE id=?", (fid,)).fetchone()
+        assert row["status"] == "rejected"
 
 
 class TestCve:

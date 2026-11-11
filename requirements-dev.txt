@@ -1,0 +1,11 @@
+# QBH inkişaf/test asılılıqları (runtime üçün tələb olunmur).
+# Quraşdırma:  pip install -r requirements.txt -r requirements-dev.txt
+#
+# Qeyd: bütün testlər yalnız `127.0.0.1`/`localhost` loopback fixture-larına
+# qarşı işləyir — CI heç bir xarici hədəfə trafik göndərmir.
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+pytest-cov>=5.0
+ruff>=0.6

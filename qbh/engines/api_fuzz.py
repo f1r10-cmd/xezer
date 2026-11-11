@@ -16,7 +16,6 @@ import tempfile
 from .. import db
 from ..adapters.base import run_process
 from ..results import EngineResult
-from ..scope import ScopeError
 
 MAX_SCHEMAS = 10
 MAX_EXAMPLES = 50

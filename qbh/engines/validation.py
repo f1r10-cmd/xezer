@@ -50,7 +50,7 @@ class ValidationEngine:
             "SELECT f.*, h.subdomain FROM findings f "
             "JOIN hosts h ON h.id = f.host_id "
             "WHERE f.severity IN ('high','critical') "
-            "AND f.status != 'false-positive' "
+            "AND f.status != 'rejected' "
             "AND f.id NOT IN (SELECT finding_id FROM validated) "
             "LIMIT ?", (MAX_CHECKS,)).fetchall()
         if not pending:
@@ -99,7 +99,7 @@ class ValidationEngine:
         passed, note = self._classify(r)
         db.upsert_validated(finding["id"], passed, note)
         if passed is False:
-            db.set_finding_status(finding["id"], "false-positive")
+            db.set_finding_status(finding["id"], "rejected")
         mark = {True: "✅", False: "❌", None: "❓"}[passed]
         print(f"  {mark} {host}: {finding['title'][:60]} ({note})")
 

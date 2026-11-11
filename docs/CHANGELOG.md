@@ -1,7 +1,89 @@
-# Dəyişikliklər — QBH v2.1 "Xəzər"
+# Dəyişikliklər — QBH "Xəzər"
 
-Bu sənəd audit və hardening işləri zamanı edilmiş əhəmiyyətli arxitektura və
-davranış dəyişikliklərini qeyd edir.
+Bu sənəd audit, hardening və offensive genişləndirmə işləri zamanı edilmiş
+əhəmiyyətli arxitektura və davranış dəyişikliklərini qeyd edir.
+
+## [2.2] — Offensive bug bounty maksimallaşdırma
+
+Fəlsəfə dəyişdi: **"topla, sonra süz" → "tap, sonra təsdiqlə"**.
+**Yeganə toxunulmaz sərhəd — avtorizasiya scope-u.** Scope daxilində əvvəl
+qadağan olan texnikalar indi icazəlidir.
+
+### İcazəli (əvvəl qadağan idi)
+
+- Aktiv fuzzinq (Schemathesis, state-dəyişən) — profil default-u **ON**;
+  `--no-active-fuzz` ilə söndürülür. Proqram qaydası həmişə qalib gəlir.
+- Nuclei intrusiv/exploit template-ləri — yalnız `aggressive` profildə;
+  zərərli kateqoriyalar (`dos`, `brute-force`, `creds-stuffing`) həmişə xaric.
+- İdentiklik/UA/başlıq/proxy rotasiyası (`rotation`) — legitim OPSEC, audit olunur.
+- WAF/filter bypass matrisi (path/header/verb) — 401/403-da `bypass` engine.
+- Adaptiv blok strategiyası (`block_strategy`) — `respect | rotate |
+  backoff_then_rotate | escalate_bypass`.
+- Agressiv redirect izləmə (`max_redirects` profilə görə 20-yə qədər).
+- CVE təsdiqi PoC-a qədər (`confirm` engine).
+
+### Yeni konfiqurasiya bölmələri (`qbh/config.py`)
+
+- `aggressiveness` (`passive | normal | aggressive`, default `aggressive`) —
+  rate/concurrency/redirect/rotation/blok default-larını təyin edir.
+- `program_rules` — `forbidden` siyahısı (`active_fuzz`, `intrusive_templates`,
+  `bypass`, `cve_poc`, `secret_replay`, `param_fuzz`, `race`),
+  `allow_wildcard_expansion`, `max_requests_per_second`.
+- `rotation` — `enabled`, `ua`, `headers`, `proxy`, `on_block`.
+- `block_strategy` — `http_429`, `http_403`.
+- `chain` — `enabled`, `max_depth`, `max_tasks`.
+
+### Zəncirləmə (`qbh/chain.py`)
+
+- Yeni `ChainPipeline`: kəşfləri növbəti addıma bağlayır (subdomain → canlı
+  yoxlama → fingerprint/JS; JS → endpoint/secret; param → fuzz; OpenAPI →
+  schemathesis; CVE → confirm; 401/403 → bypass; nuclei medium+ →
+  `boost_confidence`). Hər addım `ctx.authorization`-dan keçir; qadağan olunan
+  addım atlanır və audit olunur.
+
+### Tapıntı həyat dövrü və sübut (`qbh/db.py`)
+
+- **Breaking:** `SCHEMA_VERSION = 3`. Statuslar yenidən adlandırıldı:
+  `potential → candidate`, `verified → confirmed`, `false-positive → rejected`;
+  köhnə dəyərlər `normalize_status` ilə avtomatik çevrilir.
+- Yeni `evidence` cədvəli (`http_response | marker | callback | data | note`)
+  və `confidence` sahəsi; `db.upsert_host`/`insert_finding`/`set_finding_status`/
+  `add_evidence` API-ləri.
+
+### Hesabat (`qbh/report/`)
+
+- `report/exporters.py` — **HackerOne** formatı (`reports/qbh_<ts>.h1.json`):
+  severity → `severity_rating`, CVSS balı, CWE təklifi, remediasiya, confidence.
+- `report/generator.py` — MD + JSON + H1; rotasiya auditini hesabata daxil edir;
+  secret-lər `redact` ilə maskalanır.
+
+### HTTP / Guardian (`qbh/http_policy.py`, `qbh/antiblock/`)
+
+- `HttpPolicy` 403/429-da `block_strategy`-yə görə rotate/backoff/escalate qərarı
+  verir; `TargetBlocked(suggest_bypass=True)` `escalate_bypass` üçün.
+- `Guardian`/`Identity` — rotasiya (`ua`/`headers`/`proxy`) audit loqu ilə.
+- Bypass engine xam probe (`observe_block=False`) göndərir.
+
+### CLI (`main.py`)
+
+- Yeni bayraqlar: `--aggressiveness`, `--no-active-fuzz`.
+- `--proxy` `off|single` (OPSEC rejimi). `--active-fuzz` profil default-u ON.
+- Banner `v2.2`; profil/rate/concurrency loqda göstərilir.
+
+### Testlər / CI
+
+- Test dəsti **242 test**-ə çatdı; `tests/test_bypass.py`, `tests/test_chain.py`,
+  `tests/test_lifecycle.py`, `tests/test_rotation.py` əlavə olundu.
+- `requirements-dev.txt`, `.github/workflows/ci.yml` (lint + test matrix +
+  secret-scan), `.gitleaks.toml` əlavə olundu.
+- Ruff (`E4,E7,E9,F,B,W`) təmiz; bütün 11 lint xətası düzəldildi.
+
+### Sənədləşdirmə
+
+- Yeni: `docs/OFFENSIVE_PLAYBOOK.md`, `docs/REMEDIATION_REPORT.md`,
+  `docs/SECURITY_VERIFICATION.md`.
+- `README.md` v2.2 davranışına uyğun yeniləndi (köhnə "evasion qadağandır"
+  ifadələri silindi).
 
 ## [2.1] — Hardening və funksional tamamlama
 

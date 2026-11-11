@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""QBH — Qarabug Autonomous Hunter v2.1 'Xəzər'. Tək CLI giriş nöqtəsi.
+"""QBH — Qarabug Autonomous Hunter v2.2 'Xəzər'. Tək CLI giriş nöqtəsi.
 
-Təhlükəsizlik prinsipləri:
+Prinsiplər:
+  * **Yeganə toxunulmaz sərhəd — avtorizasiya scope-u.** Scope xaricində heç bir
+    trafik mümkün deyil; scope daxilində hər şey (aktiv fuzz, bypass, PoC)
+    icazəlidir.
   * `--targets` HEÇ VAXT konfiqurasiyadakı avtorizasiyanı keçmir — hər hədəf
     `Config.authorize_target` (fail-closed scope) ilə yoxlanılır.
-  * Dağıdıcı imkanlar (aktiv fuzzinq, race) DEFAULT olaraq deaktivdir və yalnız
-    açıq bayraqla (`--active-fuzz`, `--race-fixture`) işə düşür.
-  * Identiklik evasion yoxdur: `--proxy` yalnız açıq routing üçündür.
+  * Aktiv fuzzinq profil default-una görə ON-dur; `--no-active-fuzz` ilə söndürülə
+    bilər, proqram qaydaları (`program_rules.forbidden`) həmişə qalib gəlir.
+  * Identiklik/UA/proxy rotasiyası legitim OPSEC-dir və audit olunur.
   * Ctrl+C zamanı yarımçıq nəticələr saxlanılır və hesabat yenə yazılır.
 """
 from __future__ import annotations
@@ -24,8 +27,8 @@ from qbh.config import Config, ConfigError
 BANNER = r"""
 ╔══════════════════════════════════════════╗
 ║   Q A R A B U G   A U T O N O M O U S    ║
-║        H U N T E R  v2.1  'Xəzər'        ║
-║   (yalnız İCAZƏLİ scope daxilində)       ║
+║        H U N T E R  v2.2  'Xəzər'        ║
+║  (offensive — yalnız İCAZƏLİ scope-da)   ║
 ╚══════════════════════════════════════════╝
 """
 
@@ -38,17 +41,20 @@ EXIT_INTERRUPTED = 130
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="qbh",
-        description="QBH — Qarabug Autonomous Hunter v2.1 'Xəzər'. "
+        description="QBH — Qarabug Autonomous Hunter v2.2 'Xəzər'. "
                     "Yalnız konfiqurasiyada icazə verilmiş scope daxilində işləyir.")
     p.add_argument("--config", default="config/targets.yaml",
                    help="YAML konfiq faylı (default: config/targets.yaml)")
     p.add_argument("--mode", default="full",
                    choices=["full", "recon", "vuln", "report", "install"],
                    help="icra rejimi")
+    p.add_argument("--aggressiveness", default=None,
+                   choices=["passive", "normal", "aggressive"],
+                   help="icra profili (konfiqdəki dəyəri override edir)")
     p.add_argument("--proxy", default="off", choices=["off", "single"],
-                   help="proxy yalnız açıq routing üçündür (blok aşma DEYİL)")
-    p.add_argument("--rate", type=int, default=5,
-                   help="saniyədə sorğu limiti (konfiq limitindən yuxarı ola bilməz)")
+                   help="proxy rotasiyası/rejimi (OPSEC, yalnız scope daxilində)")
+    p.add_argument("--rate", type=int, default=None,
+                   help="saniyədə sorğu limiti (effektiv profildən yuxarı ola bilməz)")
     p.add_argument("--severity", default="low",
                    choices=["low", "medium", "high", "critical"],
                    help="hesabatda göstəriləcək minimum severity")
@@ -58,8 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="heç nə icra etmə, yalnız nə ediləcəyini göstər")
     p.add_argument("--targets", default=None,
                    help="domain1,domain2 — konfiq scope-undan KƏNARA ÇIXA BİLMƏZ")
-    p.add_argument("--active-fuzz", action="store_true",
-                   help="aktiv/state-dəyişən API fuzzinqi (default: DEAKTİV)")
+    p.add_argument("--active-fuzz", dest="active_fuzz", action="store_true",
+                   default=None,
+                   help="aktiv fuzzinqi MƏCBURİ YANDIR (profil default-u ON)")
+    p.add_argument("--no-active-fuzz", dest="active_fuzz", action="store_false",
+                   help="aktiv fuzzinqi söndür (passive yoxlama rejimi)")
     p.add_argument("--race-fixture", default=None,
                    help="race testi üçün YALNIZ lokal loopback fixture URL-i")
     p.add_argument("--race-count", type=int, default=10,
@@ -71,9 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def run(args: argparse.Namespace) -> int:
     cfg = Config.load(args.config)
+    if getattr(args, "aggressiveness", None):
+        cfg.aggressiveness = args.aggressiveness
     if cfg.warnings:
         for w in cfg.warnings:
             print(f"   [!] konfiq xəbərdarlığı: {w}")
+    print(f"   [i] profil: {cfg.aggressiveness} · rate: {cfg.effective_rate:.1f}/s · "
+          f"concurrency: {cfg.effective_concurrency} · "
+          f"aktiv fuzz: {'ON' if cfg.is_allowed('active_fuzz') else 'OFF'}")
 
     conductor = Conductor(cfg, args)
 

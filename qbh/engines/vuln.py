@@ -1,7 +1,10 @@
-"""M3: Nuclei — YALNIZ təhlükəsiz, seçilmiş template-lərlə.
+"""M3: Nuclei — profilə uyğun template dəsti ilə.
 
-Təhlükəsizlik qaydaları:
-  * Dağıdıcı/intrusiv template-lər DEFAULT olaraq istisna edilir.
+Təhlükəsizlik/offensive qaydaları:
+  * `intrusive_templates` (aggressive profil) aktiv olduqda intrusiv/exploit
+    template-ləri də işlədilir; yalnız ZƏRƏRLİ kateqoriyalar (DoS, brute
+    force) həmişə istisna edilir.
+  * profil/pasiv rejimdə geniş istisna siyahısı tətbiq olunur.
   * Template-lər AVTOMATİK yenilənmir (`-update-templates` işlədilmir).
   * Uzaqdan yüklənmiş ixtiyari template icra olunmur.
   * Yalnız scope-daxili və cooldown-da olmayan hostlar skan edilir.
@@ -33,6 +36,14 @@ EXCLUDE_TAGS = [
     "dos", "fuzz", "fuzzing", "intrusive", "brute-force", "bruteforce",
     "creds-stuffing", "default-login", "file-upload", "rce-oob",
 ]
+
+#: `intrusive_templates` profil açarı aktiv olduqda (aggressive) yalnız bunlar
+#: istisna edilir — DoS/brute-force adətən proqram qaydalarınca da qadağandır;
+#: qalan intrusiv/exploit template-ləri işlədilir.
+DESTRUCTIVE_ONLY = [
+    "dos", "fuzz", "fuzzing", "brute-force", "bruteforce", "creds-stuffing",
+]
+
 SAFE_SEVERITIES = "medium,high,critical"
 
 
@@ -63,6 +74,16 @@ class VulnEngine:
             await self._scan(hlist, strategy, res)
         return res
 
+    def _exclude_tags(self) -> list[str]:
+        """Profil/RoE-ə uyğun istisna olunan nuclei tag-ları.
+
+        `intrusive_templates` (aggressive) aktivdirsə → yalnız zərərli
+        kateqoriyalar; əks halda geniş istisna siyahısı.
+        """
+        if self.ctx.allows("intrusive_templates"):
+            return list(DESTRUCTIVE_ONLY)
+        return list(EXCLUDE_TAGS)
+
     async def _scan(self, hosts: list, strategy: str, res: EngineResult):
         tags = STRATEGY_TAGS.get(strategy, []) or GENERIC_TAGS
         targets = [f"https://{h['subdomain']}" for h in hosts]
@@ -76,7 +97,7 @@ class VulnEngine:
             args = ["nuclei", "-l", target_file,
                     "-severity", SAFE_SEVERITIES,
                     "-tags", ",".join(tags),
-                    "-exclude-tags", ",".join(EXCLUDE_TAGS),
+                    "-exclude-tags", ",".join(self._exclude_tags()),
                     "-rl", str(max(5, int(self.rate * 3))), "-c", "25",
                     "-timeout", "10", "-retries", "1",
                     "-no-interactsh", "-jsonl", "-silent", "-no-color",

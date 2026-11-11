@@ -43,7 +43,7 @@ class DeepEnumEngine:
             return_exceptions=True)
 
         provenance: dict[str, set] = {}
-        for label, item in zip(labels, gathered):
+        for label, item in zip(labels, gathered, strict=False):
             if isinstance(item, BaseException):
                 res.warn(f"{label} mənbəyi xətası: {redact(str(item))}")
                 continue

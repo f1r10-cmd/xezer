@@ -55,50 +55,57 @@ Bütün mühərriklər eyni [`qbh/http_policy.py`](../qbh/http_policy.py)
 - **Graceful cancellation:** `asyncio.CancelledError` yuxarı ötürülür; heç bir
   sorğu yarımçıq vəziyyətdə "udulmur".
 
-## 3. Blok davranışı — evasion YOXDUR
+## 3. Blok davranışı — adaptiv (configurable)
 
-Əvvəlki versiyada mövcud olan **identiklik evasion mexanizmləri silinmişdir**:
+v2.2-də blok idarəsi **"əyləc pedalı" deyil, adaptiv engine**-dir. Yeganə
+toxunulmaz sərhəd avtorizasiya scope-udur; identiklik rotasiyası legitim
+OPSEC-dir və **audit olunur**.
 
-- ❌ MAC rotasiyası
-- ❌ IP rotasiyası
-- ❌ UA rotasiyası (blok aşma məqsədilə)
-- ❌ Proxy rotasiyası (blok aşma məqsədilə)
-- ❌ "Credit" əsaslı sürət artırma
-- ❌ 403/429-u evasion siqnalı kimi qiymətləndirmə
+`block_strategy` 403/429 cavabını idarə edir:
 
-Əvəzində:
+| Strategiya | 429 | 403 |
+|---|---|---|
+| `respect` | `Retry-After`/cooldown gözlə | (403 → `backoff`) |
+| `rotate` | identikliyi dəyiş | identikliyi dəyiş |
+| `backoff_then_rotate` | əvvəl gözlə, sonra dəyiş | — |
+| `escalate_bypass` | — | bypass matrisi üçün işarə qaldır |
 
-- **403/429** → hədəf **cooldown**-a salınır (eksponensial, `max_cooldown`-la
-  məhdud). `429` üçün `Retry-After` hörmətlə qarşılanır.
+- **Cooldown:** `respect`/`backoff` strategiyalarında hədəf eksponensial
+  cooldown-a salınır (`max_cooldown`-la məhdud); `429` üçün `Retry-After`
+  hörmətlə qarşılanır.
 - **Circuit breaker:** uğurlu cavab (`2xx`/`3xx`) blok sayğacını sıfırlayır.
-- **Audit:** hər blok hadisəsi (`BlockEvent`) tarix, status və səbəblə qeyd
-  olunur; loqda "evasion tətbiq edilmir, skan bu hədəfdə dayandı" yazılır.
-- **Proxy** yalnız açıq şəkildə konfiqurasiya olunmuş routing üçün qalır
-  (`--proxy off|single`) — blok aşma vasitəsi DEYİL.
+- **Rotasiya (`rotation`):** `ua`, `headers`, `proxy`, `on_block` — profil və
+  YAML ilə configurable. Hər rotasiya `identity.audit_log()`-da qeyd olunur.
+- **Audit:** hər blok hadisəsi (`BlockEvent`) tarix, status və tətbiq olunan
+  strategiya ilə qeyd olunur.
+- **Qadağan qalanlar:** MAC/IP səviyyəsində spoofing və "credit" əsaslı sürət
+  artırma mexanizmi YOXDUR — bunlar scope-dan kənar texnikalardır.
 
 ## 4. Non-destructive testinq
 
-Default icra siyasəti aşağıdakıları **istisna edir**:
+Scope-dan asılı olmayaraq yalnız **zərərli** kateqoriyalar həmişə istisna
+edilir:
 
-- Denial-of-Service (DoS) testləri
-- Dağıdıcı race-condition testləri
-- Data extraction
+- Denial-of-Service (DoS) template-ləri/tag-ları
 - Credential stuffing və auth brute-force
-- İcazəsiz hesab yaratma və state-dəyişən əməliyyatlar
-- Production data modifikasiyası
+- Production data modifikasiyası / data extraction
+- İcazəsiz hesab yaratma
 
 Əlavə qapılar:
 
 - **Race** yalnız `--race-fixture` ilə **lokal loopback** fixture üzərində
   mümkündür; sorğu sayı sabitdir (maks 20), concurrency sərt məhduddur
   (maks 5). Loopback olmayan fixture `fail` ilə rədd olunur.
-- **API Fuzz** yalnız `--active-fuzz` verildikdə işə düşür və yalnız GET
-  metodları yoxlanır.
+- **API Fuzz** profil default-una görə ON-dur (`--no-active-fuzz` ilə söndürülür);
+  yalnız GET metodları yoxlanır.
 - **Param Enum** yalnız GET istifadə edir.
-- **Nuclei** yalnız təhlükəsiz seçilmiş template-lərlə işləyir; dağıdıcı və
-  intrusive template-lər default olaraq istisna edilir. Xaricdən yüklənmiş
-  ixtiyari template icra olunmur.
-- **CF/CDN origin-IP bypass** funksionallığı tamamilə silinmişdir.
+- **Nuclei** profilə uyğun template dəsti ilə işləyir: `aggressive` profildə
+  intrusive/exploit template-ləri də işlədilir; yalnız zərərli kateqoriyalar
+  (`dos`, `brute-force`, `creds-stuffing`) həmişə istisna edilir. Xaricdən
+  yüklənmiş ixtiyari template icra olunmur.
+- **Bypass** (401/403 matrisi) və **PoC** yalnız scope daxilində və proqram
+  qaydaları (`program_rules.forbidden`) icazə verdikdə işə düşür.
+- **CF/CDN origin-IP bypass** funksionallığı silinmişdir (icazəsiz texnika).
 
 ## 5. Subprocess təhlükəsizliyi
 

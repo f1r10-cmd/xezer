@@ -16,7 +16,30 @@ import threading
 from datetime import datetime, timezone
 
 DB_PATH = "findings.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+#: Tapıntı həyat dövrü (Faza 2/5). Kandidat → təsdiqlənmiş/rədd edilmiş →
+#: hesabatda göstərilmiş.
+FINDING_STATUSES = ("candidate", "confirmed", "rejected", "reported")
+
+#: Köhnə (v2.1) statusların yeni həyat dövrünə uyğunlaşdırılması.
+_LEGACY_STATUS = {
+    "potential": "candidate",
+    "verified": "confirmed",
+    "confirmed": "confirmed",
+    "false-positive": "rejected",
+    "false_positive": "rejected",
+    "reported": "reported",
+    "candidate": "candidate",
+    "rejected": "rejected",
+}
+
+
+def normalize_status(status: str) -> str:
+    """Statusu kanonik həyat dövrü dəyərinə çevirir."""
+    s = (status or "candidate").strip().lower()
+    s = _LEGACY_STATUS.get(s, s)
+    return s if s in FINDING_STATUSES else "candidate"
 
 _local = threading.local()
 
@@ -75,10 +98,19 @@ CREATE TABLE IF NOT EXISTS findings (
   module TEXT NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL,
   description TEXT, evidence TEXT, curl_repro TEXT, template TEXT,
   confidence REAL DEFAULT 0.5,
-  status TEXT DEFAULT 'potential',
+  status TEXT DEFAULT 'candidate',
   source TEXT,
   fingerprint TEXT,
   first_seen TEXT, last_seen TEXT
+);
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY,
+  finding_id INTEGER REFERENCES findings(id) ON DELETE CASCADE,
+  scan_id INTEGER,
+  kind TEXT,               -- http_response | marker | callback | data | note
+  content TEXT,
+  created_at TEXT,
+  UNIQUE(finding_id, kind, content)
 );
 CREATE TABLE IF NOT EXISTS cve_matches (
   id INTEGER PRIMARY KEY,
@@ -117,6 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_host ON findings(host_id);
 CREATE INDEX IF NOT EXISTS idx_findings_sev ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_cve_host ON cve_matches(host_id);
 CREATE INDEX IF NOT EXISTS idx_stage_scan ON stage_status(scan_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_finding ON evidence(finding_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
 """
 
@@ -152,6 +185,15 @@ def _migrate(conn: sqlite3.Connection):
         for col, ddl in cols.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    # v3: köhnə tapıntı statuslarını yeni həyat dövrünə köçür (data itirmədən).
+    try:
+        for old, new in _LEGACY_STATUS.items():
+            if old == new:
+                continue
+            conn.execute("UPDATE findings SET status=? WHERE status=?",
+                         (new, old))
+    except sqlite3.OperationalError:
+        pass
     conn.execute(
         "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -243,8 +285,9 @@ def _fingerprint(host_id: int, module: str, title: str, evidence: str) -> str:
 def insert_finding(host_id: int, module: str, severity: str, title: str,
                    description: str = "", evidence: str = "", curl_repro: str = "",
                    template: str = "", *, confidence: float = 0.5,
-                   status: str = "potential", source: str = "") -> int:
+                   status: str = "candidate", source: str = "") -> int:
     severity = (severity or "info").lower()
+    status = normalize_status(status)
     fp = _fingerprint(host_id, module, title, evidence or "")
     conn = get_db()
     with conn:
@@ -285,7 +328,12 @@ def insert_cve(host_id: int, cve_id: str, product: str, version: str,
 
 def set_finding_status(finding_id: int, status: str,
                        confidence: float | None = None):
-    """Tapıntının statusunu (potential/verified/false-positive) yeniləyir."""
+    """Tapıntının həyat dövrü statusunu yeniləyir.
+
+    Status `candidate | confirmed | rejected | reported` olmalıdır; köhnə
+    adlar (`potential`, `verified`, `false-positive`) avtomatik çevrilir.
+    """
+    status = normalize_status(status)
     conn = get_db()
     fields = ["status=?"]
     params: list = [status]
@@ -296,6 +344,38 @@ def set_finding_status(finding_id: int, status: str,
     with conn:
         conn.execute(
             f"UPDATE findings SET {', '.join(fields)} WHERE id=?", params)
+
+
+def add_evidence(finding_id: int, kind: str, content: str,
+                 scan_id: int | None = None) -> int:
+    """Tapıntıya sübut əlavə edir (təkrarlar UNIQUE ilə süzülür).
+
+    `kind`: `http_response | marker | callback | data | note`.
+    """
+    conn = get_db()
+    with conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO evidence(finding_id,scan_id,kind,content,"
+            "created_at) VALUES(?,?,?,?,?)",
+            (finding_id, scan_id, str(kind)[:40], str(content),
+             _now()))
+    return cur.lastrowid or -1
+
+
+def evidence_for(finding_id: int):
+    return get_db().execute(
+        "SELECT * FROM evidence WHERE finding_id=? ORDER BY id",
+        (finding_id,)).fetchall()
+
+
+def all_evidence():
+    return get_db().execute("SELECT * FROM evidence ORDER BY id").fetchall()
+
+
+def findings_by_status(status: str):
+    return get_db().execute(
+        "SELECT * FROM findings WHERE status=? ORDER BY id",
+        (normalize_status(status),)).fetchall()
 
 
 def upsert_validated(finding_id: int, passed: bool | None, note: str = ""):

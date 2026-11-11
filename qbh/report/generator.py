@@ -25,20 +25,22 @@ SEV_LABEL = {"critical": "🔴 KRİTİK", "high": "🟠 YÜKSƏK",
 ORDER = ["critical", "high", "medium", "low", "info"]
 
 STATUS_LABEL = {
-    "verified": "təsdiqlənmiş",
     "confirmed": "təsdiqlənmiş",
-    "potential": "potensial",
-    "false-positive": "false-positive",
+    "reported": "hesabatda göstərilmiş",
+    "candidate": "potensial (kandidat)",
+    "rejected": "rədd edilmiş (false-positive)",
 }
 
 LIMITATIONS = [
-    "Yalnız konfiqurasiyada AÇIQ şəkildə icazə verilmiş scope daxilində test aparılır.",
-    "Dağıdıcı testlər (DoS, state dəyişən əməliyyatlar, credential hücumu) default "
-    "olarak DEAKTİVDİR.",
+    "Yalnız konfiqurasiyada AÇIQ şəkildə icazə verilmiş scope daxilində test aparılır "
+    "(scope — yeganə toxunulmaz sərhəd).",
+    "Dağıdıcı testlər (DoS, daimi state dəyişən əməliyyatlar, credential hücumu) "
+    "default olaraq DEAKTİVDİR; aktiv fuzz/bypass profil ilə idarə olunur.",
     "Race testi yalnız `--race-fixture` ilə lokal (loopback) fixture üzərində mümkündür.",
-    "403/429 cavabları identiklik dəyişməklə aşılmır — hədəf cooldown-a salınır.",
+    "403/429 → adaptiv Guardian: cooldown, identiklik rotasiyası və ya bypass "
+    "matrisi (konfiqurasiyadan asılı).",
     "Heuristik siqnallar (banner, başlıq, sənəd aşkarlanması) tək başına zəiflik "
-    "sübutu DEYİL; manual təsdiq tələb olunur.",
+    "sübutu DEYİL; yalnız `confirmed` statuslu tapıntılar təsdiqlənmiş sayılır.",
     "Vasitə (tool) çatışmazlığı, timeout və şəbəkə xətaları əhatəni azalda bilər.",
 ]
 
@@ -84,6 +86,11 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
     cves = [dict(r) for r in conn.execute(
         "SELECT * FROM cve_matches ORDER BY in_kev DESC, epss DESC").fetchall()]
     secrets = [dict(r) for r in conn.execute("SELECT * FROM secrets").fetchall()]
+    evidence = [dict(r) for r in conn.execute(
+        "SELECT * FROM evidence ORDER BY id").fetchall()]
+    evidence_by_finding: dict[int, list] = {}
+    for e in evidence:
+        evidence_by_finding.setdefault(e["finding_id"], []).append(e)
     validated = {r["finding_id"]: dict(r) for r in
                  conn.execute("SELECT * FROM validated").fetchall()}
     halted = [dict(r) for r in conn.execute(
@@ -109,8 +116,9 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
     for f in kept:
         by_sev.setdefault(f["severity"], []).append(f)
     counts = {s: len(by_sev.get(s, [])) for s in ORDER}
-    verified = [f for f in kept if (f.get("status") in ("verified", "confirmed"))]
-    fp = [f for f in kept if f.get("status") == "false-positive"]
+    verified = [f for f in kept if (f.get("status") == "confirmed")]
+    reported = [f for f in kept if (f.get("status") == "reported")]
+    fp = [f for f in kept if f.get("status") == "rejected"]
     possible_cves = [c for c in cves if (c.get("match_type") or "possible") != "confirmed"]
     confirmed_cves = [c for c in cves if (c.get("match_type") or "") == "confirmed"]
 
@@ -127,8 +135,10 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
           f"Orta: **{counts['medium']}** · Aşağı: **{counts['low']}** · "
           f"Məlumat: **{counts['info']}**",
           f"- Təsdiqlənmiş tapıntı: **{len(verified)}** · "
-          f"Potensial: **{len(kept) - len(verified) - len(fp)}** · "
-          f"False-positive: **{len(fp)}**",
+          f"Hesabatda göstərilən: **{len(reported)}** · "
+          f"Kandidat: "
+          f"**{len(kept) - len(verified) - len(reported) - len(fp)}** · "
+          f"Rədd edilmiş: **{len(fp)}**",
           f"- CVE uyğunluğu: **{len(cves)}** "
           f"(təsdiqlənmiş: {len(confirmed_cves)}, mümkün: {len(possible_cves)})",
           f"- Aşkarlanan secret (maskalanmış): **{len(secrets)}**",
@@ -233,6 +243,12 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
             if f.get("curl_repro"):
                 L += ["- Reproduksiya:", "```bash", redact(str(f["curl_repro"]))[:1000],
                       "```"]
+            evs = evidence_by_finding.get(f["id"])
+            if evs:
+                L.append("- Sübut əlavələri:")
+                for e in evs[:10]:
+                    L.append(f"  - [{_esc(e.get('kind'), 40)}] "
+                             f"{_code(e.get('content'), 240)}")
             L.append("")
 
     # 8. CVE intellekti
@@ -284,14 +300,14 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
     L.append("")
 
     # 11/12. False-positive & Validation statusu
-    L += ["## 11. False-Positive Statusu", ""]
+    L += ["## 11. Rədd Edilmiş (false-positive) Statusu", ""]
     if fp:
         for f in fp:
             host = hosts.get(f["host_id"], {}).get("subdomain", "?")
             L.append(f"- {_code(host, 80)}: {_esc(f['title'], 120)} "
                      f"— {_esc(validated.get(f['id'], {}).get('note'), 120)}")
     else:
-        L.append("_False-positive kimi işarələnmiş tapıntı yoxdur._")
+        L.append("_Rədd edilmiş tapıntı yoxdur._")
     L.append("")
 
     L += ["## 12. Validation Statusu", ""]
@@ -340,12 +356,42 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
         L.append(f"- {_esc(lim)}")
     block_audit = meta.get("block_audit") or []
     if block_audit:
-        L += ["", "**Blok hadisələri (identiklik dəyişdirilməyib):**", ""]
+        L += ["", "**Blok hadisələri (adaptiv strategiya tətbiq olundu):**", ""]
         for ev in block_audit:
             L.append(f"- {_code(ev.get('host'), 80)} → HTTP {ev.get('status')}: "
                      f"{_esc(ev.get('reason'), 160)}")
     for w in meta.get("config_warnings") or []:
         L.append(f"- Konfiq xəbərdarlığı: {_esc(w, 200)}")
+    L.append("")
+
+    # 15. Zəncirləmə pipeline
+    chain_audit = meta.get("chain_audit") or {}
+    L += ["## 15. Zəncirləmə Pipeline (finding maximization)", ""]
+    if chain_audit:
+        L += [f"- Trigger hadisəsi: **{len(chain_audit.get('events') or [])}**",
+              f"- İcra olunan addımlar: "
+              f"{_esc(', '.join(chain_audit.get('executed') or []) or '—', 200)}",
+              f"- Delegasiya olunan addımlar: "
+              f"{_esc(', '.join(chain_audit.get('delegated') or []) or '—', 300)}",
+              f"- İcazə/qayda səbəbindən atlanan: "
+              f"**{len(chain_audit.get('skipped') or [])}**", ""]
+        for s in (chain_audit.get("skipped") or [])[:30]:
+            L.append(f"  - atlandı: {_esc(s, 200)}")
+    else:
+        L.append("_Zəncirləmə audit məlumatı yoxdur._")
+    L.append("")
+
+    # 16. İdentiklik rotasiyası (OPSEC)
+    rotation_audit = meta.get("rotation_audit") or []
+    L += ["## 16. İdentiklik Rotasiyası (OPSEC)", ""]
+    if rotation_audit:
+        L += [f"- Rotasiya hadisəsi: **{len(rotation_audit)}**", ""]
+        for ev in rotation_audit[:50]:
+            L.append(f"- {_code(ev.get('host'), 80)}: {_esc(ev.get('reason'), 120)} "
+                     f"(UA={ev.get('ua_changed')}, başlıq={ev.get('headers_changed')}, "
+                     f"proxy={ev.get('proxy_changed')})")
+    else:
+        L.append("_Rotasiya baş vermədi (ya konfiqurasiya söndürülüb, ya blok olmadı)._")
     L.append("")
 
     with open(path, "w", encoding="utf-8") as fh:
@@ -361,10 +407,12 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
             "findings_shown": len(kept),
             "by_severity": counts,
             "verified": len(verified),
+            "reported": len(reported),
             "false_positive": len(fp),
             "cves_total": len(cves),
             "cves_confirmed": len(confirmed_cves),
             "secrets": len(secrets),
+            "evidence": len(evidence),
             "halted_hosts": len(halted),
         },
         "stages": [s.to_dict() if hasattr(s, "to_dict") else s for s in stages],
@@ -383,10 +431,23 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
         "secrets": [{**s, "value_preview": mask_value(s.get("value_preview") or "")}
                     for s in secrets],
         "validation": list(validated.values()),
+        "evidence": [{**e, "content": redact(str(e.get("content") or ""))}
+                     for e in evidence],
         "limitations": LIMITATIONS,
     }
     with open(path.replace(".md", ".json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2, default=str)
+
+    # Faza 5: bounty-ready ixrac (HackerOne-uyğun JSON).
+    try:
+        from . import exporters
+
+        h1_path = exporters.export(
+            path, findings=kept, hosts=hosts,
+            evidence_by_finding=evidence_by_finding, min_severity=severity_min)
+        print(f"[✅] HackerOne ixracı: {h1_path}")
+    except Exception as exc:  # noqa: BLE001 - ixrac uğursuz olsa hesabat qalır
+        print(f"[!] HackerOne ixracı alınmadı: {type(exc).__name__}: {exc}")
 
     print(f"\n[✅] Hesabat hazırdır: {path}")
     return path

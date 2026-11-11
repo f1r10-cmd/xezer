@@ -1,0 +1,12 @@
+# gitleaks konfiqurasiyası.
+# Test fixture-ları redaction/maskalama davranışını yoxlamaq üçün UYDURMA
+# (saxta) secret oxşarları saxlayır — bunlar real açarlar deyil.
+# Yalnız `tests/` qovluğu allowlist-ə salınır; real kod bazası skan edilir.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake secrets in test fixtures (redaction tests)"
+paths = [
+  '''tests/.*\.py''',
+]

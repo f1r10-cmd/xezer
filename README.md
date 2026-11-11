@@ -1,12 +1,12 @@
-# 🎯 QBH — Qarabug Autonomous Hunter v2.1 "Xəzər"
+# 🎯 QBH — Qarabug Autonomous Hunter v2.2 "Xəzər"
 
-Bug bounty hədəfləri üzərində **yalnız icazəli scope daxilində** işləyən,
-modul-əsaslı recon və zəiflik aşkarlama platforması.
+Bug bounty hədəfləri üzərində **maksimum tapıntı** çıxaran, **yalnız icazəli
+scope daxilində** işləyən offensive recon və zəiflik aşkarlama platforması.
 
-> ⚠️ **Təhlükəsizlik prinsipi:** QBH yalnız konfiqurasiyada AÇIQ şəkildə
-> icazə verilmiş hədəflərə qarşı işləyir. `--targets` bayrağı bu
-> avtorizasiyanı **heç vaxt** keçə bilmir (fail-closed). Xarici hədəflərə
-> icazəsiz skan qadağandır.
+> ⚠️ **Yeganə toxunulmaz sərhəd — avtorizasiya scope-u.** Scope daxilində hər şey
+> (aktiv fuzzinq, WAF/filter bypass, rotasiya, PoC) **icazəlidir və təşviq
+> olunur**. Scope xaricində heç bir trafik mümkün deyil — `--targets` bayrağı
+> avtorizasiyanı **heç vaxt** keçə bilmir (fail-closed).
 
 ---
 
@@ -17,10 +17,13 @@ modul-əsaslı recon və zəiflik aşkarlama platforması.
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 2. Tool-ların vəziyyətini yoxla (heç nə quraşdırmır)
+# 2. (İnkişaf/test üçün) test və lint asılılıqları
+.venv/bin/pip install -r requirements-dev.txt
+
+# 3. Tool-ların vəziyyətini yoxla (heç nə quraşdırmır)
 python main.py --mode install --dry-run
 
-# 3. Çatışmayan tool-ları təhlükəsiz üsulla quraşdır (yoxlama ilə)
+# 4. Çatışmayan tool-ları təhlükəsiz üsulla quraşdır (yoxlama ilə)
 python main.py --mode install --auto-install
 ```
 
@@ -34,7 +37,8 @@ yalnız tövsiyə göstərilir.
 
 - Python 3.10+ (inkişaf/test mühiti: **Python 3.14**, Kali Linux x86_64)
 - `aiohttp>=3.9`, `PyYAML>=6.0`, `packaging>=23.0`, `dnspython>=2.4.0`
-- Testlər üçün: `pytest`, `pytest-asyncio`
+- Testlər üçün: `requirements-dev.txt` (`pytest`, `pytest-asyncio`,
+  `pytest-cov`, `ruff`)
 - Tool-lar (bax: [Tool asılılıqları](#tool-asılılıqları))
 
 ---
@@ -52,6 +56,8 @@ Konfiqurasiya YAML faylıdır. Nümunələr:
 ```yaml
 program: "Qarabug"
 nvd_api_key: ""                 # istəyə bağlı (NVD rate limitini artırır)
+aggressiveness: aggressive      # passive | normal | aggressive (default)
+
 scope:
   - domain: example.com
     in_scope:
@@ -59,6 +65,7 @@ scope:
       - "*.example.com"         # bütün alt domenlər
     out_of_scope:
       - "admin.example.com"     # açıq şəkildə istisna
+
 limits:
   requests_per_second: 5        # host başına rate limit
   max_subdomains_per_target: 500
@@ -66,21 +73,70 @@ limits:
   connect_timeout: 10
   total_timeout: 30
   cooldown: 60                  # 403/429 sonrası hədəf cooldown-u (saniyə)
-proxy_file: ""                  # açıq routing üçün (blok aşma DEYİL)
+
+proxy_file: ""                  # rotasiya üçün proxy siyahısı (OPSEC)
+
+# Proqramın qadağaları (RoE) — verilən hərəkət atlanır və audit olunur
+program_rules:
+  forbidden: []                 # məs.: ["cve_poc", "race"]
+  allow_wildcard_expansion: true
+  max_requests_per_second: 0    # 0 → profil/limits default
+
+# İdentiklik rotasiyası (OPSEC; profil default-larını override edir)
+rotation:
+  enabled: true
+  ua: true
+  headers: true
+  proxy: false
+  on_block: true
+
+# Adaptiv blok strategiyası
+block_strategy:
+  http_429: backoff_then_rotate  # respect | rotate | backoff_then_rotate
+  http_403: rotate               # backoff | rotate | escalate_bypass
+
+chain:
+  enabled: true
+  max_depth: 3
+  max_tasks: 200
+
 antiblock:
   interface: "eth0"
 ```
 
 **Validasiya qaydaları:** boş/xətalı `scope` HEÇ VAXT qəbul edilmir; rəqəmsal
-limitlər aralıq yoxlanılır; naməlum açarlar və silinmiş evasion açarları
-(`rotate_levels`, `credits`) barədə xəbərdarlıq verilir.
+limitlər aralıq yoxlanılır; `aggressiveness` yalnız `passive|normal|aggressive`
+ola bilər; naməlum açarlar və silinmiş köhnə evasion açarları (`rotate_levels`,
+`credits`) barədə xəbərdarlıq verilir.
+
+### Aggressiveness profilləri
+
+Profil rate, concurrency, redirect dərinliyi və rotasiyanın **default-larını**
+təyin edir (default → `aggressive`):
+
+| Parametr | passive | normal | aggressive |
+|---|---|---|---|
+| `rate_factor` | 0.5 | 1.0 | 2.0 |
+| `concurrency_factor` | 0.5 | 1.0 | 2.0 |
+| `max_redirects` | 5 | 10 | 20 |
+| `active_fuzz` | ✗ | ✓ | ✓ |
+| `intrusive_templates` | ✗ | ✗ | ✓ |
+| `rotate_ua` | ✗ | ✓ | ✓ |
+| `rotate_headers` | ✗ | ✗ | ✓ |
+| `rotate_proxy` | ✗ | ✗ | ✓ |
+| `block_429` | respect | respect | backoff_then_rotate |
+| `block_403` | backoff | backoff | rotate |
+
+Profil yalnız **aşağı salına** bilər: proqram qaydası (`program_rules.forbidden`)
+`active_fuzz`-ı qadağan edərsə, `aggressive` olsa belə deaktiv olunur. Ətraflı:
+[docs/OFFENSIVE_PLAYBOOK.md](docs/OFFENSIVE_PLAYBOOK.md).
 
 ### Scope idarəetməsi
 
 Dəstəklənən qaydalar: dəqiq domen, wildcard (`*.example.com`), kök domen,
 IP ünvan, CIDR blok. Domenlər kanonikləşdirilir (lowercase, IDNA/punycode).
 Suffix-confusion (`example.com.attacker.test`), malformed hostname, rəqəmsal
-TLD və tək-etiketli adlar rədd olunur. Redirect-lər özümüz idarə edilir və
+TLD və tək-etiketli adlar rədd olunur. Redirect-lər özümüz idarə olunur və
 hər addım scope yoxlanılır — **redirect escape mümkün deyil**.
 
 ---
@@ -88,13 +144,16 @@ hər addım scope yoxlanılır — **redirect escape mümkün deyil**.
 ## CLI istifadəsi
 
 ```bash
-# Tam skan (recon + vuln) — konfiqdəki bütün icazəli hədəflər
+# Tam skan (recon + vuln + zəncirləmə) — konfiqdəki bütün icazəli hədəflər
 python main.py --config config/targets.yaml --mode full
 
 # Yalnız recon / yalnız vuln / yalnız hesabat
 python main.py --mode recon
 python main.py --mode vuln
 python main.py --mode report
+
+# İcra profilini override et
+python main.py --mode full --aggressiveness passive
 
 # Tool-ların vəziyyəti / quraşdırma
 python main.py --mode install --dry-run
@@ -111,13 +170,15 @@ python main.py --mode full --severity high
 |---|---|
 | `--config PATH` | YAML konfiq (default: `config/targets.yaml`) |
 | `--mode {full,recon,vuln,report,install}` | İcra rejimi |
+| `--aggressiveness {passive,normal,aggressive}` | İcra profili (konfiqdəki dəyəri override edir) |
 | `--targets d1,d2` | Yalnız bu hədəflər (scope yoxlaması ilə) |
-| `--rate N` | Saniyədə sorğu limiti (konfiq limitindən yuxarı ola bilməz) |
+| `--rate N` | Saniyədə sorğu limiti (effektiv profildən yuxarı ola bilməz) |
 | `--severity {low,medium,high,critical}` | Hesabat filtri |
-| `--proxy {off,single}` | Açıq routing (blok aşma DEYİL) |
+| `--proxy {off,single}` | Proxy rejimi (OPSEC rotasiyası, scope daxilində) |
+| `--active-fuzz` | Aktiv fuzzinqi MƏCBURİ yandır (profil default-u ON) |
+| `--no-active-fuzz` | Aktiv fuzzinqi söndür (passive yoxlama rejimi) |
 | `--auto-install` | Çatışmayan tool-ları quraşdır (yoxlama ilə) |
 | `--dry-run` | Heç nə icra etmə, yalnız planı göstər |
-| `--active-fuzz` | Aktiv/state-dəyişən API fuzzinqi (**default: deaktiv**) |
 | `--race-fixture URL` | Race testi üçün YALNIZ lokal loopback fixture |
 | `--race-count N` | Race fixture sorğu sayı (default 10, maks 20) |
 | `--race-concurrency N` | Race concurrency (default 4, maks 5) |
@@ -141,6 +202,7 @@ fixture istifadə edir və heç bir xarici şəbəkəyə müraciət etmir:
 
 ```bash
 .venv/bin/python -m pytest -q
+.venv/bin/ruff check --select E4,E7,E9,F,B,W qbh tests main.py
 ```
 
 ---
@@ -150,50 +212,82 @@ fixture istifadə edir və heç bir xarici şəbəkəyə müraciət etmir:
 | Modul | Vəzifə |
 |---|---|
 | M1+ Deep Enum | subfinder + amass + crt.sh + alterx → dedup + scope + provenance |
-| M1 Recon | httpx + naabu + katana + gau (origin-IP bypass YOXDUR) |
+| M1 Recon | httpx + naabu + katana + gau |
 | M2 Fingerprint | Başlıq/HTML/imza ilə texnologiya + versiya (confidence ilə) |
-| M3 Vuln | Nuclei — yalnız təhlükəsiz seçilmiş template-lər |
+| M3 Vuln | Nuclei — profilə uyğun template dəsti (aggressive → intrusiv; yalnız zərərli tag-lar həmişə istisna) |
 | M4 JS Analiz | JS-də endpoint + secret (maskalanır) |
 | M5 Content | ffuf (flat) + feroxbuster (recursive), wordlist limiti |
 | API Enum | OpenAPI/Swagger kəşfi + kiterunner (yalnız GET parse) |
-| API Fuzz | Schemathesis property-test (**yalnız `--active-fuzz`, GET-only**) |
+| API Fuzz | Schemathesis property-test (profil default ON; GET-only) |
 | Param Enum | Arjun + x8 gizli parametr (yalnız GET) |
 | Race | **YALNIZ lokal fixture** — sabit say, sərt concurrency |
 | M6+ CVE İntel | NVD + OSV + GitHub Advisory + CISA KEV + EPSS (mənbə atribusiyası) |
-| Validation | Sübut yoxlaması, confidence, false-positive sinfi |
-| Guardian | Scope + rate + cooldown/circuit-breaker + audit (**evasion yoxdur**) |
+| Validation / Confirm | Sübut yoxlaması, CVE/exposure təsdiqi, confidence |
+| Bypass | 401/403 matrisi (path/header/verb) — aggressiv profildə |
+| Chain | Kəşfləri avtomatik növbəti addıma zəncirləyir (`qbh/chain.py`) |
+| Guardian | Scope + rate + adaptiv blok strategiyası + rotasiya audit |
 
 ---
 
-## Blok idarəetməsi (Guardian)
+## Zəncirləmə pipeline-ı
 
-QBH bloklanmanı **identiklik dəyişməklə aşmır**. Bu, açıq şəkildə
-qadağandır.
+`recon → discover → enrich → test → confirm → poc → report`. Hər kəşf (subdomain,
+JS endpoint, secret, parameter, CVE uyğunluğu, 401/403 yol) avtomatik növbəti
+yoxlama addımına bağlanır. Cədvəl və detallar:
+[docs/OFFENSIVE_PLAYBOOK.md](docs/OFFENSIVE_PLAYBOOK.md#2-zəncirləmə-cədvəli-qbhchainpy).
 
-- Hər host üçün rate limit və concurrency tətbiq olunur.
-- Hər hosta **sabit** realist UA və `Accept-Language` istifadə olunur.
-- **403/429** alındıqda hədəf **cooldown**-a salınır (eksponensial, maksimumla
-  məhdud). `429` üçün `Retry-After` başlığı hörmətlə qarşılanır.
-- Blok hadisələri audit üçün qeyd olunur; skan həmin hədəfdə dayandırılır və
-  səbəb aydın şəkildə loqa yazılır.
-- MAC rotasiyası, IP rotasiyası, UA rotasiyası və "credit" sürətləndirmə
-  mexanizmi **tamamilə silinmişdir**.
+Hər addım `ctx.authorization`-dan keçir: `authorize_url()` (scope) və
+`allows(action)` (proqram RoE). Qadağan olunmuş addım **atlanır** və audit
+olunur — uydurma tapıntı YARADILMIR.
 
 ---
 
-## Etik qaydalar və non-destructive siyasət
+## Blok idarəetməsi (adaptiv Guardian)
 
-Default icra siyasəti aşağıdakıları **istisna edir**:
+`Guardian` "əyləc pedalı" deyil — **adaptiv** engine-dir. 403/429 cavabında
+`block_strategy`-yə görə qərar verir:
 
-- Denial-of-Service (DoS) testləri
-- Dağıdıcı race-condition testləri (yalnız lokal fixture istisna)
-- Data extraction
+| Strategiya | 429 | 403 |
+|---|---|---|
+| `respect` | `Retry-After`/cooldown gözlə | (403 → `backoff`) |
+| `rotate` | identikliyi dəyiş | identikliyi dəyiş |
+| `backoff_then_rotate` | əvvəl gözlə, sonra dəyiş | — |
+| `escalate_bypass` | — | bypass matrisi üçün işarə qaldır |
+
+**OPSEC rotasiyası** (`rotation`: `ua`, `headers`, `proxy`, `on_block`)
+configurable-dir və hər rotasiya `identity.audit_log()`-da qeyd olunur.
+Bypass mühərriki 403-ü görmək üçün xam probe sorğuları göndərir
+(`observe_block=False`) ki, host cooldown-a düşməzdən əvvəl matris sınansın.
+
+---
+
+## Etik qaydalar və scope siyasəti
+
+**Yeganə sərhəd — avtorizasiya scope-u.** Scope daxilində offensive texnikalar
+(aktiv fuzzinq, bypass, rotasiya, PoC) icazəlidir. Scope-dan asılı olmayaraq
+yalnız **zərərli** kateqoriyalar həmişə istisna edilir:
+
+- Denial-of-Service (DoS) template-ləri/tag-ları
 - Credential stuffing və auth brute-force
-- İcazəsiz hesab yaratma və state-dəyişən əməliyyatlar
-- İstehsalat (production) datasının dəyişdirilməsi
+- İstehsalat (production) datasının dağıdılması
 
-Heuristik siqnallar (banner, başlıq, sənəd aşkarlanması) tək başına zəiflik
-sübutu DEYİL — `potential` kimi qeyd olunur və manual təsdiq tələb edir.
+Race testı yalnız açıq göstərilən **lokal loopback fixture** üzərində işləyir.
+Heuristik siqnallar (banner, başlıq) tək başına zəiflik sübutu DEYİL —
+`candidate` kimi qeyd olunur və manual təsdiq tələb edir.
+
+---
+
+## Hesabat
+
+`qbh/report/generator.py` üç formatda yazır:
+
+- `reports/qbh_<ts>.md` — Markdown hesabat,
+- `reports/qbh_<ts>.json` — strukturlaşdırılmış JSON,
+- `reports/qbh_<ts>.h1.json` — **HackerOne** uyğun format (severity →
+  `severity_rating`, CVSS balı, CWE təklifi, remediasiya, confidence).
+
+Secret-lər hər formatda `redact` ilə maskalanır. Tapıntı həyat dövrü:
+`candidate → confirmed → reported` (və `rejected`) + `evidence` cədvəli.
 
 ---
 
@@ -218,17 +312,21 @@ kimi qeyd olunur və hesabatda göstərilir.
 |---|---|
 | `scope boşdur` | Konfiqdə ən azı bir `scope` qeydi olmalıdır |
 | `scope xaricində rədd edildi` | Hədəf konfiqdəki `in_scope` ilə uyğun deyil |
+| `aggressiveness ... etibarsızdır` | Yalnız `passive\|normal\|aggressive` |
 | Çatışmayan tool xəbərdarlığı | `python main.py --mode install --auto-install` |
 | `go tapılmadı` | Go quraşdırın, sonra `--mode install` təkrarlayın |
-| Hədəf cooldown-a düşdü | 403/429 cavabı — gözləyin, identiklik dəyişdirilmir |
+| Hədəf cooldown-a düşdü | `block_strategy`-yə baxın; `rotate` rejimində identiklik dəyişir |
 | Hesabat yaradılmadı | `[!] Hesabat yaradıla bilmədi` loquna baxın |
 
 ---
 
 ## Sənədləşdirmə
 
+- [docs/OFFENSIVE_PLAYBOOK.md](docs/OFFENSIVE_PLAYBOOK.md) — offensive zəncirləmə, profillər, rotasiya
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — arxitektura və modul təsviri
 - [docs/SECURITY.md](docs/SECURITY.md) — təhlükəsizlik modeli və siyasətlər
+- [docs/SECURITY_VERIFICATION.md](docs/SECURITY_VERIFICATION.md) — dürüst PASS/PARTIAL yoxlaması
+- [docs/REMEDIATION_REPORT.md](docs/REMEDIATION_REPORT.md) — v2.1→v2.2 remediasiya hesabatı
 - [docs/TESTING.md](docs/TESTING.md) — test dəsti və işə salma
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — dəyişikliklər tarixçəsi
 - [docs/AUDIT_REPORT.md](docs/AUDIT_REPORT.md) — audit və remediasiya hesabatı
@@ -238,8 +336,10 @@ kimi qeyd olunur və hesabatda göstərilir.
 ## Məlum məhdudiyyətlər
 
 - Yalnız konfiqurasiyada AÇIQ icazə verilmiş scope daxilində işləyir.
-- Dağıdıcı testlər (DoS, state-dəyişən) default olaraq deaktivdir.
+- JS-dən çıxarılan secret-lərin birbaşa replay-i implementasiya olunmayıb
+  (bazada yalnız maskalanmış secret saxlanılır) — bax
+  [docs/SECURITY_VERIFICATION.md](docs/SECURITY_VERIFICATION.md).
+- OpenAPI server-lərinin canlı scope yoxlaması ayrıca lokal addım kimi yoxdur.
 - Race testi yalnız `--race-fixture` ilə **lokal loopback** fixture üzərində.
 - Heuristik siqnallar manual təsdiq tələb edir.
 - Tool çatışmazlığı, timeout və şəbəkə xətaları əhatəni azalda bilər.
-- Cloudflare/CDN origin-IP bypass **dəstəklənmir** (icazəsiz texnikadır).

@@ -19,6 +19,7 @@ from . import db
 from .antiblock.guardian import Guardian
 from .antiblock.identity import IdentityManager
 from .antiblock.proxymanager import ProxyManager
+from .authorization import from_config as build_authorization
 from .context import Context
 from .engines import cve_intel
 from .engines.api_enum import APIEnumEngine
@@ -51,28 +52,40 @@ class Conductor:
         db.init_db()
 
         lim = cfg.limits
-        cli_rate = float(getattr(args, "rate", None) or lim.requests_per_second)
-        eff_rate = max(0.1, min(cli_rate, float(lim.requests_per_second)))
+        # Effektiv rate/concurrency: profil faktoru tətbiq olunur, CLI isə
+        # yalnız aşağı salmağa (daha ehtiyatlı) icazə verir.
+        eff_rate = cfg.effective_rate
+        cli_rate = getattr(args, "rate", None)
+        if cli_rate:
+            eff_rate = max(0.1, min(float(cli_rate), eff_rate))
         policy = HttpPolicy(
             cfg.scope,
             rate=eff_rate,
-            max_concurrency=int(lim.max_concurrency),
+            max_concurrency=int(cfg.effective_concurrency),
             connect_timeout=float(lim.connect_timeout),
             total_timeout=float(lim.total_timeout),
             cooldown=float(lim.cooldown),
+            max_redirects=int(cfg.profile.get("max_redirects", 20)),
+            block_429=cfg.block_strategy.http_429,
+            block_403=cfg.block_strategy.http_403,
         )
         self.proxies = ProxyManager(getattr(args, "proxy", "off"), cfg.proxy_file)
-        self.guardian = Guardian(
-            IdentityManager(self.proxies.for_host(""), cfg.interface), policy)
+        self.identity = IdentityManager(
+            cfg.proxy_file, cfg.interface, cfg.rotation,
+            getattr(args, "proxy", "off"))
+        self.guardian = Guardian(self.identity, policy)
+        self.authorization = build_authorization(
+            cfg, scan_id=None, canceller=asyncio.Event())
 
         self.scan_id: int | None = None
         self.stages: list[StageResult] = []
         self.authorized_targets: list[str] = []
         self.tool_report = None
         self._tools_checked = False
+        self.chain = None
 
         self.ctx = Context(cfg=cfg, args=args, guardian=self.guardian,
-                           scan_id=None)
+                           scan_id=None, authorization=self.authorization)
 
     # ---------------- target + scope ----------------
     def resolve_targets(self) -> list[str]:
@@ -189,11 +202,13 @@ class Conductor:
         await self._ensure_tools()
         for t in targets:
             deep = DeepEnumEngine(self.ctx)
-            sr = await self._run_stage("deep_enum", t, lambda t=t: deep.run(t))
+            sr = await self._run_stage(
+                "deep_enum", t, lambda t=t, deep=deep: deep.run(t))
             subs = sr.data.get("subdomains") or {t}
             recon = ReconEngine(self.ctx)
             await self._run_stage(
-                "recon", t, lambda t=t, subs=subs: recon.run(t, subs))
+                "recon", t,
+                lambda t=t, subs=subs, recon=recon: recon.run(t, subs))
 
     async def run_vuln(self) -> None:
         await self._ensure_tools()
@@ -218,6 +233,15 @@ class Conductor:
         await self._run_stage("cve_intel", "", lambda: cve_intel.run(self.ctx))
         await self._run_stage("validation", "",
                               lambda: ValidationEngine(self.ctx).run())
+        # Faza 2: zəncirləmə — kəşfləri avtomatik test/təsdiqə bağlayır.
+        await self._run_stage("chain", "", lambda: self._run_chain())
+
+    async def _run_chain(self):
+        from .chain import ChainPipeline
+
+        pipeline = ChainPipeline(self.ctx)
+        self.chain = pipeline
+        return await pipeline.run()
 
     # ---------------- yekun ----------------
     def generate_report(self) -> str | None:
@@ -231,8 +255,11 @@ class Conductor:
                     "mode": getattr(self.args, "mode", "full"),
                     "targets": list(self.authorized_targets),
                     "rate": self.ctx.rate,
+                    "aggressiveness": self.cfg.aggressiveness,
                     "config_warnings": list(self.cfg.warnings),
                     "block_audit": self.guardian.audit(),
+                    "rotation_audit": self.guardian.rotation_audit(),
+                    "chain_audit": self.chain.audit() if self.chain else {},
                 })
         except Exception:  # noqa: BLE001 - hesabat yaradılmasa da pipeline bitməlidir
             print("[!] Hesabat yaradıla bilmədi:")
@@ -257,19 +284,28 @@ class Conductor:
         if summary["blocks"]:
             print(f"  [⛔] {summary['blocks']} blok hadisəsi → "
                   f"dayandırılan hostlar: {', '.join(summary['blocked_hosts'])}")
-            print("      (identiklik dəyişdirilmədi — yalnız cooldown tətbiq edildi)")
+        if summary.get("rotations"):
+            print(f"  [↻] {summary['rotations']} identiklik rotasiyası "
+                  f"(UA/başlıq/proxy rotasiyası konfiqurasiya ilə idarə olunur)")
 
     async def _pipeline(self, mode: str, body) -> None:
         self.scan_id = db.start_scan(self.cfg.program, mode)
         self.ctx.scan_id = self.scan_id
+        self.authorization.scan_id = self.scan_id
+        status = "completed"
         try:
             await body()
         except asyncio.CancelledError:
+            self.authorization.cancel()
+            status = "cancelled"
             print("\n[!] İcra ləğv edildi (Ctrl+C) — yarımçıq nəticələr saxlanılır")
             raise
         finally:
+            if status != "cancelled" and self.failed_stages:
+                status = "partial" if len(self.failed_stages) < len(self.stages) \
+                    else "failed"
             self.generate_report()
-            db.finish_scan(self.scan_id, "done")
+            db.finish_scan(self.scan_id, status)
             self.print_summary()
 
     async def run_full(self) -> None:

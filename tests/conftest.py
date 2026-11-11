@@ -173,11 +173,11 @@ def make_ctx(loopback_config):
     from qbh.context import Context
     from qbh.http_policy import HttpPolicy
 
-    def _make(cfg=None, *, active_fuzz=False, race_fixture=None,
+    def _make(cfg=None, *, active_fuzz=None, race_fixture=None,
               race_count=10, race_concurrency=4):
         cfg = cfg or loopback_config
         policy = HttpPolicy(cfg.scope, rate=1000, max_concurrency=10)
-        guardian = Guardian(IdentityManager(None, "lo"), policy)
+        guardian = Guardian(IdentityManager("", "lo"), policy)
         args = argparse.Namespace(
             rate=1000, active_fuzz=active_fuzz, race_fixture=race_fixture,
             race_count=race_count, race_concurrency=race_concurrency)

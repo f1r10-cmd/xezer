@@ -36,24 +36,27 @@ qbh-xazar/
 │   ├── proxies.txt
 │   └── strategies/*.yaml       # fingerprint strategiyaları
 ├── qbh/
-│   ├── config.py               # YAML yükləmə + ciddi validasiya
+│   ├── config.py               # YAML yükləmə + profillər/RoE + ciddi validasiya
 │   ├── scope.py                # ScopeEnforcer, normalize_host, extract_host
+│   ├── authorization.py        # vahid scope/RoE qərar mərkəzi (fail-closed)
 │   ├── http_policy.py          # HttpPolicy, TargetBlocked, parse_retry_after
+│   ├── payloads.py             # WAF/filter bypass matrisi (path/header/verb)
+│   ├── chain.py                # ChainPipeline — tapıntı zəncirləmə
 │   ├── context.py              # Context dataclass
 │   ├── results.py              # EngineResult, StageResult
 │   ├── redact.py               # secret maskalama
-│   ├── db.py                   # SQLite sxem + miqrasiya + dedup
+│   ├── db.py                   # SQLite sxem (v3) + miqrasiya + dedup + evidence
 │   ├── installer.py            # tool aşkarlama/quraşdırma
 │   ├── conductor.py            # orkestrasiya
 │   ├── antiblock/
-│   │   ├── guardian.py         # blok/cooldown nəzarəti (evasion yoxdur)
-│   │   ├── identity.py         # sabit identiklik (UA/proxy)
-│   │   ├── proxymanager.py     # off / single (rotate silindi)
-│   │   └── ua_rotator.py       # sabit UA seçimi
+│   │   ├── guardian.py         # blok/cooldown + adaptiv strategiya nəzarəti
+│   │   ├── identity.py         # configurable identiklik + rotasiya audit
+│   │   ├── proxymanager.py     # off / single / rotate
+│   │   └── ua_rotator.py       # UA hovuzu (rotasiya profilə görə)
 │   ├── engines/                # bütün mühərriklər
 │   ├── adapters/base.py        # shell-siz subprocess icrası
-│   └── report/generator.py
-├── tests/                      # pytest dəsti (151 test)
+│   └── report/                 # generator + HackerOne exporters
+├── tests/                      # pytest dəsti (242 test)
 └── docs/
 ```
 

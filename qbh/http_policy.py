@@ -1,16 +1,23 @@
 """Mərkəzləşdirilmiş HTTP Request Policy.
 
 Bütün modullar HTTP sorğularını BURADAN keçirir. Təmin edir:
-  * scope yoxlaması (hər sorğu və hər redirect addımı)
+  * scope yoxlaması (hər sorğu və hər redirect addımı) — yeganə toxunulmaz qayda
   * host başına rate limit + qlobal concurrency limiti
   * bağlantı və ümumi timeout
   * məhdud eksponensial backoff ilə retry
-  * Retry-After hörməti (429)
-  * 403/429 → target üçün cooldown + circuit breaker (EVASION YOXDUR)
-  * blok hadisələrinin audit qeydi
+  * `Retry-After` hörməti (429)
+  * **adaptiv blok strategiyası** (`block_429`/`block_403`):
+      - `respect`            → Retry-After/cooldown gözləyir,
+      - `backoff`            → eksponensial cooldown,
+      - `rotate`             → identikliyi dəyişir və yenidən yoxlayır,
+      - `backoff_then_rotate`→ əvvəl gözləyir, sonra identikliyi dəyişir,
+      - `escalate_bypass`    → `TargetBlocked(suggest_bypass=True)` qaldırır ki
+                              zəncirləmə bypass matrisini işə salsın.
+  * identiklik rotasiyası (`identity_provider`) — UA/başlıq/proxy (OPSEC)
+  * blok və rotasiya hadisələrinin audit qeydi
   * graceful cancellation (CancelledError udulmur)
 
-Bu modul heç vaxt identiklik dəyişmir, MAC/IP/proxy rotasiyası etmir.
+Scope qapısı burada heç vaxt keçilə bilməz — yalnız İCAZƏLİ hədəflərə trafik.
 """
 from __future__ import annotations
 
@@ -28,6 +35,10 @@ from .scope import ScopeEnforcer, ScopeError, extract_host
 
 class TargetBlocked(RuntimeError):
     """Hədəf blok/cooldown altındadır — sorğu göndərilmir."""
+
+    def __init__(self, *args, suggest_bypass: bool = False):
+        super().__init__(*args)
+        self.suggest_bypass = suggest_bypass
 
 
 def parse_retry_after(value) -> float:
@@ -91,10 +102,14 @@ class HttpPolicy:
         total_timeout: float = 30.0,
         max_retries: int = 2,
         backoff_base: float = 0.5,
-        max_redirects: int = 5,
+        max_redirects: int = 20,
         cooldown: float = 60.0,
         max_cooldown: float = 600.0,
         max_body: int = 2_000_000,
+        block_429: str = "respect",
+        block_403: str = "backoff",
+        identity_provider=None,
+        max_rotate_attempts: int = 2,
     ):
         self.scope = scope
         self.rate = float(rate)
@@ -108,8 +123,20 @@ class HttpPolicy:
         self.cooldown = cooldown
         self.max_cooldown = max_cooldown
         self.max_body = max_body
+        self.block_429 = block_429
+        self.block_403 = block_403
+        self.identity_provider = identity_provider
+        self.max_rotate_attempts = max(0, int(max_rotate_attempts))
         self._state: dict[str, _HostState] = defaultdict(_HostState)
         self.block_events: list[BlockEvent] = []
+        self.rotation_events: list[dict] = []
+
+    def _block_strategy(self, status: int) -> str:
+        if status == 429:
+            return self.block_429
+        if status == 403:
+            return self.block_403
+        return "respect"
 
     # ---------------- rate limiting + cooldown ----------------
     async def _wait_rate(self, host: str) -> None:
@@ -164,7 +191,7 @@ class HttpPolicy:
                             f"{reason}; hədəf {wait:.0f}s dayandırıldı{note}")
             self.block_events.append(ev)
             print(f"   [⛔] {host}: HTTP {status} → {wait:.0f}s cooldown "
-                  f"(evasion tətbiq edilmir, skan bu hədəfdə dayandı)")
+                  f"(strategiya: {self._block_strategy(status)})")
         elif 200 <= status < 400:
             st.blocks = 0
             st.halted_until = 0.0
@@ -182,42 +209,54 @@ class HttpPolicy:
         headers: dict | None = None,
         allow_redirects: bool = False,
         retries: int | None = None,
+        observe_block: bool = True,
         **kwargs,
     ) -> HttpResponse:
         try:
             host = extract_host(url)
             host = self.scope.authorize(host)
         except ScopeError as exc:
-            raise ScopeError(f"sorğu scope xaricində bloklandı: {url} ({exc})")
+            raise ScopeError(
+                f"sorğu scope xaricində bloklandı: {url} ({exc})") from exc
 
         await self.acquire(host)
 
         max_tries = self.max_retries if retries is None else max(0, int(retries))
         attempt = 0
+        rotate_attempts = 0
         current = url
         redirects = 0
 
         while True:
+            attempt_headers = headers
+            call_kwargs = dict(kwargs)
+            if self.identity_provider is not None:
+                if attempt_headers is None:
+                    attempt_headers = self.identity_provider.headers_for(host)
+                if "proxy" not in call_kwargs:
+                    px = self.identity_provider.proxy_for(host)
+                    if px:
+                        call_kwargs["proxy"] = px
             try:
                 async with self._sem:
                     started = time.monotonic()
                     timeout = aiohttp.ClientTimeout(
                         total=self.total_timeout, connect=self.connect_timeout)
                     async with session.request(
-                            method, current, headers=headers, timeout=timeout,
-                            allow_redirects=False, **kwargs) as resp:
+                            method, current, headers=attempt_headers, timeout=timeout,
+                            allow_redirects=False, **call_kwargs) as resp:
                         status = resp.status
                         head = dict(resp.headers)
                         text, truncated = await self._read_body(resp)
                         elapsed = time.monotonic() - started
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 attempt += 1
                 if attempt > max_tries:
                     raise
                 await asyncio.sleep(self.backoff_base * (2 ** (attempt - 1)))
                 continue
 
-            # Redirect-ləri ÖZÜMÜZ idarə edirik — scope yoxlaması ilə
+            # Redirect-ləri ÖZÜMÜZ idarə edirik — hər addım scope yoxlanılır
             if allow_redirects and status in (301, 302, 303, 307, 308):
                 location = head.get("Location")
                 if location and redirects < self.max_redirects:
@@ -227,9 +266,43 @@ class HttpPolicy:
                         method = "GET"
                     continue
 
-            self.record(host, status, head)
-            if self.is_halted(host):
-                raise TargetBlocked(f"{host}: HTTP {status} → cooldown aktivdir")
+            # ---- blok (403/429) → adaptiv strategiya ----
+            # `observe_block=False` (məs. bypass probe): xam status qaytarılır və
+            # host cooldown-a salınmır → eyni yol üzrə bypass matrisi sınana bilər.
+            if status in (403, 429) and observe_block:
+                strategy = self._block_strategy(status)
+                if strategy in ("rotate", "backoff_then_rotate", "escalate_bypass"):
+                    if strategy == "backoff_then_rotate":
+                        ra = parse_retry_after(
+                            head.get("Retry-After") or head.get("retry-after")
+                        ) if status == 429 else 0.0
+                        await asyncio.sleep(min(max(ra, self.backoff_base), 5.0))
+                    if (rotate_attempts < self.max_rotate_attempts
+                            and self.identity_provider is not None):
+                        if self.identity_provider.rotate(
+                                host, reason=f"HTTP {status} ({strategy})"):
+                            rotate_attempts += 1
+                            self.rotation_events.append(
+                                {"host": host, "status": status,
+                                 "strategy": strategy})
+                            print(f"   [↻] {host}: HTTP {status} → identiklik "
+                                  f"dəyişdirildi ({strategy}), təkrar yoxlanılır")
+                            await self.acquire(host)
+                            continue
+                    # rotasiya mümkün olmadı → cooldown + (lazımdırsa) bypass işarəsi
+                    self.record(host, status, head)
+                    raise TargetBlocked(
+                        f"{host}: HTTP {status} → "
+                        + ("bypass matrisi tələb olunur" if strategy == "escalate_bypass"
+                           else "cooldown aktivdir"),
+                        suggest_bypass=(strategy == "escalate_bypass"))
+                # respect / backoff → klassik cooldown
+                self.record(host, status, head)
+                if self.is_halted(host):
+                    raise TargetBlocked(f"{host}: HTTP {status} → cooldown aktivdir")
+
+            if observe_block or status not in (403, 429):
+                self.record(host, status, head)
             return HttpResponse(status, head, text, current, elapsed, truncated)
 
     async def _read_body(self, resp: aiohttp.ClientResponse):
@@ -259,4 +332,7 @@ class HttpPolicy:
             "blocked_hosts": sorted({e.host for e in self.block_events}),
             "rate": self.rate,
             "max_concurrency": self.max_concurrency,
+            "rotations": len(self.rotation_events),
+            "block_429": self.block_429,
+            "block_403": self.block_403,
         }

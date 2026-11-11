@@ -97,6 +97,23 @@ class TestSafetyGates:
         assert any("active-fuzz" in w for w in res.warnings)
 
 
+class TestVulnTemplateProfile:
+    """`intrusive_templates` profil açarı nuclei istisna siyahısına təsir edir."""
+
+    def test_aggressive_uses_minimal_excludes(self, tmp_db, make_ctx):
+        from qbh.engines.vuln import DESTRUCTIVE_ONLY, VulnEngine
+
+        assert VulnEngine(make_ctx())._exclude_tags() == DESTRUCTIVE_ONLY
+
+    def test_passive_uses_broad_excludes(self, tmp_db, make_ctx, load_config):
+        from qbh.engines.vuln import EXCLUDE_TAGS, VulnEngine
+
+        cfg = load_config([
+            {"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
+             "out_of_scope": []}], extra={"aggressiveness": "passive"})
+        assert VulnEngine(make_ctx(cfg))._exclude_tags() == EXCLUDE_TAGS
+
+
 class TestEngineScopeBoundary:
     """Scope qapısı mühərrik sərhədində MÜTLƏQ tətbiq olunur."""
 

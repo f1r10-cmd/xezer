@@ -74,6 +74,76 @@ async def test_403_triggers_cooldown_not_evasion(local_server):
             await policy.get(s, f"{base}/count")
 
 
+# ---------------------------------------------------------------- adaptiv strategiya
+class _Rotator:
+    """Minimum identiklik provayderi (rotasiya audit üçün)."""
+
+    def __init__(self, can_rotate: bool = True):
+        self.rotated: list[tuple] = []
+        self._can = can_rotate
+        self._n = 0
+
+    def headers_for(self, host):
+        return {"User-Agent": f"ua-{self._n}"}
+
+    def proxy_for(self, host):
+        return None
+
+    def rotate(self, host, reason: str = "") -> bool:
+        if not self._can:
+            return False
+        self._n += 1
+        self.rotated.append((host, reason))
+        return True
+
+
+async def test_403_rotate_strategy_rotates_identity(local_server):
+    rot = _Rotator()
+    policy = HttpPolicy(scope(["127.0.0.1"]), rate=1000, cooldown=0.1,
+                        block_403="rotate", max_rotate_attempts=2)
+    policy.identity_provider = rot
+    async with aiohttp.ClientSession() as s:
+        with pytest.raises(TargetBlocked):
+            await policy.get(s, f"{local_server['base']}/403")
+    assert len(rot.rotated) == 2               # iki dəfə rotasiya cəhdi
+    assert policy.rotation_events             # audit qeydi var
+    assert policy.rotation_events[0]["strategy"] == "rotate"
+
+
+async def test_403_escalate_bypass_sets_flag(local_server):
+    rot = _Rotator(can_rotate=False)           # rotasiya mümkün deyil
+    policy = HttpPolicy(scope(["127.0.0.1"]), rate=1000, cooldown=30,
+                        block_403="escalate_bypass")
+    policy.identity_provider = rot
+    async with aiohttp.ClientSession() as s:
+        with pytest.raises(TargetBlocked) as ei:
+            await policy.get(s, f"{local_server['base']}/403")
+    assert ei.value.suggest_bypass is True
+
+
+async def test_403_rotate_impossible_falls_to_cooldown(local_server):
+    rot = _Rotator(can_rotate=False)
+    policy = HttpPolicy(scope(["127.0.0.1"]), rate=1000, cooldown=30,
+                        block_403="rotate")
+    policy.identity_provider = rot
+    async with aiohttp.ClientSession() as s:
+        with pytest.raises(TargetBlocked) as ei:
+            await policy.get(s, f"{local_server['base']}/403")
+    assert ei.value.suggest_bypass is False    # bypass işarəsi qalxmır
+    assert policy.is_halted("127.0.0.1")
+
+
+async def test_429_rotate_strategy_rotates(local_server):
+    rot = _Rotator()
+    policy = HttpPolicy(scope(["127.0.0.1"]), rate=1000, cooldown=0.1,
+                        block_429="rotate", max_rotate_attempts=1)
+    policy.identity_provider = rot
+    async with aiohttp.ClientSession() as s:
+        with pytest.raises(TargetBlocked):
+            await policy.get(s, f"{local_server['base']}/429")
+    assert len(rot.rotated) == 1
+
+
 async def test_429_honours_retry_after(local_server):
     policy = HttpPolicy(scope(["127.0.0.1"]), rate=1000, cooldown=1,
                         max_cooldown=600)

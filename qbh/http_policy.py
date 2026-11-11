@@ -110,6 +110,7 @@ class HttpPolicy:
         block_403: str = "backoff",
         identity_provider=None,
         max_rotate_attempts: int = 2,
+        transport=None,
     ):
         self.scope = scope
         self.rate = float(rate)
@@ -127,6 +128,10 @@ class HttpPolicy:
         self.block_403 = block_403
         self.identity_provider = identity_provider
         self.max_rotate_attempts = max(0, int(max_rotate_attempts))
+        #: Faza 2.1: TLS/HTTP2 barmaq izi təqlid edən transport (opsional).
+        #: `available` False olduqda şəffaf şəkildə aiohttp istifadə olunur.
+        self.transport = transport
+        self.transport_requests = 0
         self._state: dict[str, _HostState] = defaultdict(_HostState)
         self.block_events: list[BlockEvent] = []
         self.rotation_events: list[dict] = []
@@ -238,17 +243,8 @@ class HttpPolicy:
                     if px:
                         call_kwargs["proxy"] = px
             try:
-                async with self._sem:
-                    started = time.monotonic()
-                    timeout = aiohttp.ClientTimeout(
-                        total=self.total_timeout, connect=self.connect_timeout)
-                    async with session.request(
-                            method, current, headers=attempt_headers, timeout=timeout,
-                            allow_redirects=False, **call_kwargs) as resp:
-                        status = resp.status
-                        head = dict(resp.headers)
-                        text, truncated = await self._read_body(resp)
-                        elapsed = time.monotonic() - started
+                status, head, text, truncated, elapsed = await self._fetch_once(
+                    session, method, current, attempt_headers, call_kwargs)
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 attempt += 1
                 if attempt > max_tries:
@@ -305,6 +301,40 @@ class HttpPolicy:
                 self.record(host, status, head)
             return HttpResponse(status, head, text, current, elapsed, truncated)
 
+    def _use_transport(self) -> bool:
+        """Təqlid edən transport hazırdırmı? (yoxsa aiohttp-a düşülür)."""
+        t = self.transport
+        return t is not None and bool(getattr(t, "available", False))
+
+    async def _fetch_once(self, session, method: str, url: str, headers,
+                          call_kwargs) -> tuple:
+        """Bir HTTP cəhdi — transport varsa onunla, yoxsa aiohttp ilə.
+
+        Faza 2.1: hədəfə gedən BÜTÜN native HTTP trafiki (mümkün olduqda)
+        təqlid edən TLS/HTTP2 transportundan keçir; əks halda şəffaf şəkildə
+        aiohttp istifadə olunur (heç bir səssiz davranış dəyişikliyi yoxdur).
+        """
+        async with self._sem:
+            started = time.monotonic()
+            if self._use_transport():
+                tr = await self.transport.request(
+                    method, url, headers=headers, allow_redirects=False,
+                    proxy=call_kwargs.get("proxy"),
+                    timeout=self.total_timeout)
+                self.transport_requests += 1
+                return (tr.status, dict(tr.headers), tr.text, tr.truncated,
+                        time.monotonic() - started)
+            timeout = aiohttp.ClientTimeout(
+                total=self.total_timeout, connect=self.connect_timeout)
+            async with session.request(
+                    method, url, headers=headers, timeout=timeout,
+                    allow_redirects=False, **call_kwargs) as resp:
+                status = resp.status
+                head = dict(resp.headers)
+                text, truncated = await self._read_body(resp)
+                return (status, head, text, truncated,
+                        time.monotonic() - started)
+
     async def _read_body(self, resp: aiohttp.ClientResponse):
         try:
             raw = await resp.content.read(self.max_body + 1)
@@ -335,4 +365,5 @@ class HttpPolicy:
             "rotations": len(self.rotation_events),
             "block_429": self.block_429,
             "block_403": self.block_403,
+            "impersonated_requests": self.transport_requests,
         }

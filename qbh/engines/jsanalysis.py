@@ -69,8 +69,9 @@ class JSAnalysisEngine:
         res = EngineResult(stage=self.name)
         rows = db.get_db().execute(
             "SELECT u.url, u.host_id, h.subdomain FROM urls u "
-            "JOIN hosts h ON h.id=u.host_id WHERE u.is_js=1 LIMIT ?",
-            (MAX_JS,)).fetchall()
+            "JOIN hosts h ON h.id=u.host_id WHERE u.is_js=1 AND h.scan_id=? "
+            "LIMIT ?",
+            (db.effective_scan_id(self.ctx.scan_id), MAX_JS)).fetchall()
         if not rows:
             return res.skip("JS faylı tapılmadı — JS analizi atlandı")
         print(f"[═══ M4 JS ANALİZ ═══] {len(rows)} fayl")
@@ -132,7 +133,7 @@ class JSAnalysisEngine:
                     f"aşkarlanan credential İSTİFADƏ EDİLMİR.",
                     evidence=mask_value(row["url"]),
                     confidence=base_conf, status="potential",
-                    source="jsanalysis")
+                    source="jsanalysis", scan_id=self.ctx.scan_id)
                 res.findings += 1
                 print(f"[🔑] {row['subdomain']}: {name} (maskalanmış: {masked})")
 
@@ -143,7 +144,7 @@ class JSAnalysisEngine:
             url = f"https://{row['subdomain']}{ep}"
             if not self.cfg.in_scope(url):
                 continue
-            db.insert_url(row["host_id"], url, "jsanalysis", False)
+            db.insert_url(row["host_id"], url, "jsanalysis", False, scan_id=self.ctx.scan_id)
             res.urls += 1
             added += 1
         if added:

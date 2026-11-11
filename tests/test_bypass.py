@@ -101,7 +101,9 @@ class TestBypassEngine:
         from qbh.engines.bypass import BypassEngine
 
         url = f"{bypass_server}/admin"
-        hid = db.upsert_host("127.0.0.1", status_code=200)
+        # v4: host cari skanın (scan_id=1) altında olmalıdır — əks halda
+        # `_record` onu tapmır (per-scan izolyasiya).
+        hid = db.upsert_host("127.0.0.1", 1, status_code=200)
         db.insert_url(hid, url, "ferox")
         res = await BypassEngine(_ctx(make_ctx)).run([url])
         assert res.findings >= 1
@@ -115,7 +117,7 @@ class TestBypassEngine:
         from qbh.engines.bypass import BypassEngine
 
         url = f"{local_server['base']}/403"   # həmişə 403, bypass yoxdur
-        hid = db.upsert_host("127.0.0.1", status_code=200)
+        hid = db.upsert_host("127.0.0.1", 1, status_code=200)
         db.insert_url(hid, url, "ferox")
         res = await BypassEngine(_ctx(make_ctx)).run([url])
         assert res.findings == 0

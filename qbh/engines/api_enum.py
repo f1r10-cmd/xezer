@@ -47,7 +47,7 @@ class APIEnumEngine:
 
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
-        hosts = db.alive_hosts()[:MAX_HOSTS]
+        hosts = db.alive_hosts(self.ctx.scan_id)[:MAX_HOSTS]
         if not hosts:
             return res.skip("yaşayan host yoxdur — API enum atlandı")
 
@@ -76,6 +76,12 @@ class APIEnumEngine:
         except ScopeError as exc:
             res.warn(f"{host}: {exc}")
             return
+        # Faza 0.2: kiterunner hədəfi egress validasiyasından keçir.
+        tset = await self.ctx.egress.authorize_process_targets(
+            [f"https://{host}"])
+        if host not in set(tset.hostnames):
+            res.warn(f"egress: {host} scope xaricindədir — kiterunner atlandı")
+            return
         proc = await run_process(
             ["kr", "scan", f"https://{host}", "-w", wordlist],
             timeout=TARGET_TIMEOUT)
@@ -97,7 +103,7 @@ class APIEnumEngine:
             if not self.cfg.in_scope(url):
                 res.warn(f"scope xaricində route rədd edildi: {url}")
                 continue
-            db.insert_url(row["id"], url, "kiterunner", False)
+            db.insert_url(row["id"], url, "kiterunner", False, scan_id=self.ctx.scan_id)
             res.urls += 1
             if int(status) in (200, 201, 204):
                 db.insert_finding(
@@ -108,7 +114,8 @@ class APIEnumEngine:
                     evidence=url,
                     curl_repro=(f"curl -X GET '{url}' -H "
                                 f"'User-Agent: {ua_for(host)}'"),
-                    confidence=0.6, status="potential", source="kiterunner")
+                    confidence=0.6, status="potential", source="kiterunner",
+                    scan_id=self.ctx.scan_id)
                 res.findings += 1
                 print(f"[⚡] {host}: GET {route} ({status})")
 
@@ -145,7 +152,7 @@ class APIEnumEngine:
                         continue
                     if not self.cfg.in_scope(r.url):
                         continue
-                    db.insert_url(h["id"], r.url, "api-enum", False)
+                    db.insert_url(h["id"], r.url, "api-enum", False, scan_id=self.ctx.scan_id)
                     res.urls += 1
                     if "openapi" in url or "swagger" in url:
                         db.insert_finding(
@@ -154,6 +161,7 @@ class APIEnumEngine:
                             "OpenAPI/Swagger sxemi əlçatandır — sxem ictimai "
                             "olduqda həssas endpoint siyahısı sıza bilər.",
                             evidence=url, confidence=0.6,
-                            status="potential", source="api-enum")
+                            status="potential", source="api-enum",
+                            scan_id=self.ctx.scan_id)
                         res.findings += 1
                         print(f"[⚡] {url} → 200 (API sxemi!)")

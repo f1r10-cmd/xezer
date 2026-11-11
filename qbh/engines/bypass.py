@@ -71,7 +71,8 @@ class BypassEngine:
             "SELECT u.url, h.id AS host_id, h.subdomain FROM urls u "
             "JOIN hosts h ON h.id=u.host_id "
             "WHERE h.status_code IS NOT NULL "
-            "AND (h.halted IS NULL OR h.halted=0) LIMIT 500").fetchall()
+            "AND (h.halted IS NULL OR h.halted=0) AND h.scan_id=? "
+            "LIMIT 500", (db.effective_scan_id(self.ctx.scan_id),)).fetchall()
         picked: list[str] = []
         for r in rows:
             if INTERESTING_RE.search(r["url"]):
@@ -112,7 +113,8 @@ class BypassEngine:
     def _record(self, url, attempt, base_status, resp, res: EngineResult) -> None:
         row = db.get_db().execute(
             "SELECT h.id AS host_id, h.subdomain FROM urls u "
-            "JOIN hosts h ON h.id=u.host_id WHERE u.url=?", (url,)).fetchone()
+            "JOIN hosts h ON h.id=u.host_id WHERE u.url=? AND h.scan_id=?",
+            (url, db.effective_scan_id(self.ctx.scan_id))).fetchone()
         if not row:
             return
         excerpt = (resp.text or "")[:MAX_HTML].replace("\n", " ")

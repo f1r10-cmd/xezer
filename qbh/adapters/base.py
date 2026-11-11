@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import tempfile
 from dataclasses import dataclass
 
@@ -46,31 +47,66 @@ class ProcResult:
         return self.returncode == 0 and not self.timed_out and not self.missing
 
 
+def kill_process_group(proc: asyncio.subprocess.Process,
+                       sig: int = signal.SIGKILL) -> None:
+    """Prosesi və BÜTÖV proses qrupunu öldürür (Faza 0.2).
+
+    `start_new_session=True` ilə başladılmış alt-proseslər üçün `killpg`
+    istifadə olunur ki, alətin özü açdığı uşaq proseslər də dayansın.
+    Qrup mövcud deyilsə sadəcə `proc.kill()`.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
+
 async def run_process(cmd: list[str], *, stdin: bytes | None = None,
-                      timeout: float = 600) -> ProcResult:
-    """Təhlükəsiz async subprocess. Shell yoxdur; cancel/timeout → kill."""
+                      timeout: float = 600,
+                      cancel_event: "asyncio.Event | None" = None) -> ProcResult:
+    """Təhlükəsiz async subprocess. Shell yoxdur; cancel/timeout → proses qrupu öldürülür.
+
+    `cancel_event` verildikdə proses ayrı monitor vasitəsilə izlənir və
+    event set olan kimi bütöv proses qrupu SIGKILL edilir (Guardian/Conductor
+    halt qərarı).
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE if stdin is not None
             else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True)
     except FileNotFoundError:
         return ProcResult(-1, missing=True)
     except OSError:
         return ProcResult(-1, missing=True)
 
+    killer: asyncio.Task | None = None
+    if cancel_event is not None:
+        async def _watch():
+            await cancel_event.wait()
+            kill_process_group(proc)
+        killer = asyncio.create_task(_watch())
+
     try:
         out, err = await asyncio.wait_for(proc.communicate(stdin), timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        kill_process_group(proc)
         await proc.wait()
         return ProcResult(-1, timed_out=True)
     except asyncio.CancelledError:
-        proc.kill()
+        kill_process_group(proc)
         await proc.wait()
         raise
+    finally:
+        if killer is not None:
+            killer.cancel()
     return ProcResult(proc.returncode or 0, out or b"", err or b"")
 
 

@@ -107,10 +107,10 @@ $ .venv/bin/python -m ruff check --select E4,E7,E9,F,B,W .
 All checks passed!
 
 $ .venv/bin/python -m pytest
-234 passed
+370 passed
 
 $ .venv/bin/python -m pytest --cov=qbh --cov-report=term-missing
-TOTAL  3512  1750  50%
+TOTAL  3801  1803  53%
 ```
 
 Testlər **yalnız** `127.0.0.1`/`localhost` loopback fixture-larına qarşı

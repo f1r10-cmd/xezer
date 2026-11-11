@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""QBH — Qarabug Autonomous Hunter v2.2 'Xəzər'. Tək CLI giriş nöqtəsi.
+"""QBH — Qarabug Autonomous Hunter v3.0 'Xəzər'. Tək CLI giriş nöqtəsi.
 
 Prinsiplər:
   * **Yeganə toxunulmaz sərhəd — avtorizasiya scope-u.** Scope xaricində heç bir
@@ -27,7 +27,7 @@ from qbh.config import Config, ConfigError
 BANNER = r"""
 ╔══════════════════════════════════════════╗
 ║   Q A R A B U G   A U T O N O M O U S    ║
-║        H U N T E R  v2.2  'Xəzər'        ║
+║        H U N T E R  v3.0  'Xəzər'        ║
 ║  (offensive — yalnız İCAZƏLİ scope-da)   ║
 ╚══════════════════════════════════════════╝
 """
@@ -41,7 +41,7 @@ EXIT_INTERRUPTED = 130
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="qbh",
-        description="QBH — Qarabug Autonomous Hunter v2.2 'Xəzər'. "
+        description="QBH — Qarabug Autonomous Hunter v3.0 'Xəzər'. "
                     "Yalnız konfiqurasiyada icazə verilmiş scope daxilində işləyir.")
     p.add_argument("--config", default="config/targets.yaml",
                    help="YAML konfiq faylı (default: config/targets.yaml)")

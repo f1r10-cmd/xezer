@@ -99,7 +99,7 @@ class RaceEngine:
 
         if ok_200 > 1 and len(distinct_bodies) > 1:
             db.insert_finding(
-                self._fixture_host_id(fixture),
+                self._fixture_host_id(fixture, self.ctx.scan_id),
                 "race", "low",
                 f"Race simptomu (lokal fixture): {fixture}",
                 f"Lokal fixture-də {count} paralel sorğunun {ok_200}-i HTTP 200 "
@@ -115,7 +115,8 @@ class RaceEngine:
         return res
 
     @staticmethod
-    def _fixture_host_id(fixture: str) -> int:
+    def _fixture_host_id(fixture: str, scan_id=None) -> int:
         """Lokal fixture üçün host qeydi yaradır (yalnız lokal saxlanış)."""
         host = urlsplit(fixture).hostname or "127.0.0.1"
-        return db.upsert_host(host, status_code=200, source="race-local")
+        return db.upsert_host(host, scan_id, status_code=200,
+                              source="race-local")

@@ -155,24 +155,24 @@ class TestRun:
 # ---------------------------------------------------------------- finding store
 class TestFindingStore:
     def test_candidate_then_confirm(self, tmp_db):
-        hid = db.upsert_host("example.com", status_code=200)
+        hid = db.upsert_host("example.com", status_code=200, scan_id=1)
         store = FindingStore(scan_id=1)
         fid = store.candidate(hid, "bypass", "high", "Title")
-        assert db.findings_by_status("candidate")[0]["id"] == fid
+        assert db.findings_by_status("candidate", scan_id=1)[0]["id"] == fid
         store.confirm(fid, note="təsdiq", evidence="HTTP 200")
-        confirmed = db.findings_by_status("confirmed")
+        confirmed = db.findings_by_status("confirmed", scan_id=1)
         assert confirmed[0]["id"] == fid
         assert any(e["kind"] == "note" for e in db.evidence_for(fid))
 
     def test_reject_and_report(self, tmp_db):
-        hid = db.upsert_host("example.com", status_code=200)
-        store = FindingStore()
+        hid = db.upsert_host("example.com", status_code=200, scan_id=1)
+        store = FindingStore(scan_id=1)
         f1 = store.candidate(hid, "js", "medium", "A")
         f2 = store.candidate(hid, "js", "medium", "B")
         store.reject(f1, note="404")
         store.report(f2)
-        assert db.findings_by_status("rejected")[0]["id"] == f1
-        assert db.findings_by_status("reported")[0]["id"] == f2
+        assert db.findings_by_status("rejected", scan_id=1)[0]["id"] == f1
+        assert db.findings_by_status("reported", scan_id=1)[0]["id"] == f2
 
     def test_attach_evidence(self, tmp_db):
         hid = db.upsert_host("example.com", status_code=200)

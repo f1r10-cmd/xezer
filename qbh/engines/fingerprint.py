@@ -46,7 +46,7 @@ class FingerprintEngine:
 
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
-        hosts = db.alive_hosts()
+        hosts = db.alive_hosts(self.ctx.scan_id)
         if not hosts:
             return res.skip("yaşayan host yoxdur — fingerprint atlandı")
         print(f"[═══ M2 FINGERPRINT ═══] {len(hosts)} host")
@@ -85,7 +85,8 @@ class FingerprintEngine:
             product, version, conf = await self._version(
                 session, host, strategy, headers, body)
             tech_raw = self._tech_raw(row["tech_raw"], techs, product, version)
-            db.upsert_host(host, strategy=strategy, tech_raw=tech_raw[:500])
+            db.upsert_host(host, self.ctx.scan_id, strategy=strategy,
+                           tech_raw=tech_raw[:500])
             if version:
                 res.data.setdefault("technologies", []).append({
                     "host": host, "product": product, "version": version,

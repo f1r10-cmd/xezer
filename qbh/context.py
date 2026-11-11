@@ -5,7 +5,7 @@ Dövrəli import-un qarşısını almaq üçün ayrı modulda saxlanılır.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -16,6 +16,15 @@ class Context:
     guardian: Any            # qbh.antiblock.guardian.Guardian
     scan_id: int | None = None
     authorization: Any = None  # qbh.authorization.Authorization
+    #: DNS pinning audit (Faza 0.2): host → (IP-lər, həll vaxtı).
+    resolved_ips: dict = field(default_factory=dict)
+    #: Egress audit jurnalı (rədd edilən hədəflər, pin edilmiş IP-lər).
+    egress_audit: list = field(default_factory=list)
+    #: Aşkarlanmış WAF adı (Faza 2.2) — SQLi/SSTI tamper seçimi üçün.
+    waf_name: str = ""
+    _egress: Any = None
+    _oob: Any = None
+    _stealth: Any = None
 
     def _auth(self):
         """Authorization yoxdursa konfiqdən təmin edir (fail-closed)."""
@@ -24,6 +33,57 @@ class Context:
 
             self.authorization = from_config(self.cfg, self.scan_id)
         return self.authorization
+
+    @property
+    def egress(self):
+        """Subprocess hədəf validasiyası üçün tək giriş nöqtəsi (Faza 0.2)."""
+        if self._egress is None:
+            from .egress import EgressController
+
+            self._egress = EgressController(
+                self._auth(),
+                resolved_store=self.resolved_ips,
+                audit=self.egress_audit)
+        return self._egress
+
+    @property
+    def oob(self):
+        """Sistem üzrə tək OOB geri-zəng idarəçisi (Faza 1.4)."""
+        if self._oob is None:
+            from .oob import OOBManager
+
+            cfg = getattr(self.cfg, "oob", None)
+            self._oob = OOBManager(
+                domain=getattr(cfg, "domain", "") or "",
+                enabled=getattr(cfg, "enabled", False),
+                listen_host=getattr(cfg, "listen_host", "127.0.0.1"),
+                listen_port=getattr(cfg, "listen_port", 0),
+                backend=getattr(cfg, "backend", "local"),
+                audit=self.egress_audit)
+        return self._oob
+
+    @property
+    def stealth(self):
+        """Stealth vəziyyəti: TLS təqlidi + tempo + WAF (Faza 2)."""
+        if self._stealth is None:
+            from .stealth import ImpersonatingTransport, Pacer, StealthStack
+
+            scfg = getattr(self.cfg, "stealth", None)
+            transport = ImpersonatingTransport(
+                getattr(scfg, "impersonate", "off"),
+                timeout=float(self.limits.total_timeout))
+            pacer = Pacer(
+                getattr(scfg, "pacing", "aggressive"), rate=self.rate,
+                max_overhead=float(getattr(scfg, "pacing_max_overhead", 1.15)))
+            self._stealth = StealthStack(cfg=scfg, transport=transport,
+                                         pacer=pacer,
+                                         audit=self.egress_audit)
+        return self._stealth
+
+    def note_waf(self, profile) -> None:
+        """WAF aşkarlamasını qeyd edir və `waf_name`-i sinxronlaşdırır."""
+        self.stealth.note_waf(profile)
+        self.waf_name = self.stealth.waf_name
 
     @property
     def rate(self) -> float:

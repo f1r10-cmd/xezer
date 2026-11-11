@@ -78,23 +78,32 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
     meta = meta or {}
     conn = db.get_db()
 
-    hosts = {r["id"]: dict(r) for r in db.all_hosts()}
+    # Per-scan izolyasiya (v4): hesabat YALNIZ cari skanın məlumatlarını göstərir.
+    # `scan_id` yoxdursa → legacy qrupu (0); heç vaxt başqa skanın sətirləri
+    # qarışmır. `hosts` cədvəli əsas filtrdir; qalan cədvəllər `host_id` ilə
+    # ona bağlanır.
+    sid = db.effective_scan_id(meta.get("scan_id"))
+    scan_sub = "SELECT id FROM hosts WHERE scan_id=?"
+    hosts = {r["id"]: dict(r) for r in db.all_hosts(meta.get("scan_id"))}
     findings = [dict(r) for r in conn.execute(
-        "SELECT * FROM findings ORDER BY CASE severity "
-        "WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 "
-        "WHEN 'low' THEN 4 ELSE 5 END").fetchall()]
+        f"SELECT * FROM findings WHERE host_id IN ({scan_sub}) ORDER BY CASE "
+        "severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' "
+        "THEN 3 WHEN 'low' THEN 4 ELSE 5 END", (sid,)).fetchall()]
     cves = [dict(r) for r in conn.execute(
-        "SELECT * FROM cve_matches ORDER BY in_kev DESC, epss DESC").fetchall()]
-    secrets = [dict(r) for r in conn.execute("SELECT * FROM secrets").fetchall()]
+        f"SELECT * FROM cve_matches WHERE host_id IN ({scan_sub}) "
+        "ORDER BY in_kev DESC, epss DESC", (sid,)).fetchall()]
+    secrets = [dict(r) for r in conn.execute(
+        f"SELECT * FROM secrets WHERE host_id IN ({scan_sub})", (sid,)).fetchall()]
     evidence = [dict(r) for r in conn.execute(
-        "SELECT * FROM evidence ORDER BY id").fetchall()]
+        "SELECT e.* FROM evidence e JOIN findings f ON f.id=e.finding_id "
+        f"WHERE f.host_id IN ({scan_sub}) ORDER BY e.id", (sid,)).fetchall()]
     evidence_by_finding: dict[int, list] = {}
     for e in evidence:
         evidence_by_finding.setdefault(e["finding_id"], []).append(e)
     validated = {r["finding_id"]: dict(r) for r in
                  conn.execute("SELECT * FROM validated").fetchall()}
     halted = [dict(r) for r in conn.execute(
-        "SELECT * FROM hosts WHERE halted=1").fetchall()]
+        "SELECT * FROM hosts WHERE halted=1 AND scan_id=?", (sid,)).fetchall()]
 
     sev_rank = _sev_rank()
     min_rank = sev_rank.get(severity_min, 0)

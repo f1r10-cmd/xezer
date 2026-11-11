@@ -51,6 +51,14 @@ class ReconEngine:
         if not subs:
             res.fail("scope-daxili heç bir host yoxdur")
             return res
+        # Faza 0.2: alt-proseslərə (httpx/naabu/katana/gau) verilən hostlar
+        # egress validasiyasından keçir + DNS pinning audit-i aparılır.
+        tset = await self.ctx.egress.authorize_process_targets(subs)
+        allowed = set(tset.hostnames)
+        subs = [h for h in subs if h in allowed]
+        if not subs:
+            res.fail("egress: heç bir icazəli host qalmadı")
+            return res
         print(f"[+] {len(subs)} host recon boru xəttinə daxil oldu")
 
         alive = await self._httpx(subs)
@@ -99,6 +107,7 @@ class ReconEngine:
             cdn = r.get("cdn")
             host_id = db.upsert_host(
                 host,
+                self.ctx.scan_id,
                 ip=a[0] if a else None,
                 cdn=(cdn[0] if isinstance(cdn, list) and cdn else cdn) or None,
                 status_code=r.get("status_code"),
@@ -131,7 +140,7 @@ class ReconEngine:
                     f"{h['host']} üzərində {len(ports)} port açıqdır "
                     f"(yalnız -top-ports 100)",
                     evidence=", ".join(ports), confidence=0.6,
-                    source="naabu")
+                    source="naabu", scan_id=self.ctx.scan_id)
                 res.findings += 1
 
     @staticmethod
@@ -173,7 +182,7 @@ class ReconEngine:
                     continue
                 if not self.cfg.in_scope(host):
                     continue
-                db.insert_url(h["id"], u, "katana", u.endswith(".js"))
+                db.insert_url(h["id"], u, "katana", u.endswith(".js"), scan_id=self.ctx.scan_id)
                 res.urls += 1
                 n += 1
             if n:
@@ -183,7 +192,7 @@ class ReconEngine:
         r = await run_process(["gau", domain, "--threads", "5"], timeout=180)
         if r.missing or r.timed_out:
             return
-        host_map = {h["subdomain"]: h["id"] for h in db.alive_hosts()}
+        host_map = {h["subdomain"]: h["id"] for h in db.alive_hosts(self.ctx.scan_id)}
         n = 0
         for url in r.stdout.decode(errors="ignore").splitlines()[:2000]:
             url = url.strip()
@@ -194,7 +203,7 @@ class ReconEngine:
             except ScopeError:
                 continue
             if host in host_map and self.cfg.in_scope(host):
-                db.insert_url(host_map[host], url, "gau", url.endswith(".js"))
+                db.insert_url(host_map[host], url, "gau", url.endswith(".js"), scan_id=self.ctx.scan_id)
                 res.urls += 1
                 n += 1
         print(f"[+] gau: {n} arxiv URL")

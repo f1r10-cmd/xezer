@@ -20,7 +20,13 @@ from .scope import ScopeEnforcer, ScopeError, normalize_host
 KNOWN_TOP_KEYS = {
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
+    "oob", "stealth",
 }
+
+#: Faza 2 — stealth qatının strateji variantları.
+PROXY_STRATEGIES = {"off", "single", "rotate", "residential", "tor"}
+PACING_PROFILES = {"passive", "normal", "aggressive"}
+IMPERSONATE_TARGETS = {"off", "chrome", "safari", "firefox", "edge"}
 
 #: `antiblock` bölməsində qəbul olunan açar(lar). Digərləri (köhnə `rotate_levels`,
 #: `credits`) sadəcə xəbərdarlıqla nəzərə alınmır.
@@ -103,6 +109,32 @@ class ChainConfig:
 
 
 @dataclass
+class OOBConfig:
+    """Faza 1.4 — Out-of-Band geri-zəng konfiqurasiyası."""
+    enabled: bool = True
+    domain: str = ""             # internetdən əlçatan geri-zəng domeni
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 0
+    backend: str = "local"       # "local" | "interactsh"
+    wait: float = 20.0           # callback gözləmə müddəti (saniyə)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.enabled and self.domain)
+
+
+@dataclass
+class StealthConfig:
+    """Faza 2 — deteksiya azaltma konfiqurasiyası (profil-əsaslı)."""
+    impersonate: str = "chrome"          # off|chrome|safari|firefox|edge
+    proxy_strategy: str = "off"          # off|single|rotate|residential|tor
+    pacing: str = "aggressive"           # passive|normal|aggressive
+    pacing_max_overhead: float = 1.15    # bulk fazalarda maksimal yavaşlama
+    waf_adapt: bool = True               # WAF aşkarlaması → bypass/rate/tamper
+    tor_for_sensitive_only: bool = True  # Tor yalnız həssas fazalarda
+
+
+@dataclass
 class ProgramRules:
     """Rules of Engagement — proqramın qadağaları."""
     forbidden: set[str] = field(default_factory=set)
@@ -126,6 +158,8 @@ class Config:
     rotation: RotationConfig = field(default_factory=RotationConfig)
     block_strategy: BlockStrategy = field(default_factory=BlockStrategy)
     chain: ChainConfig = field(default_factory=ChainConfig)
+    oob: OOBConfig = field(default_factory=OOBConfig)
+    stealth: StealthConfig = field(default_factory=StealthConfig)
     program_rules: ProgramRules = field(default_factory=ProgramRules)
     warnings: list[str] = field(default_factory=list)
     _raw: dict = field(default_factory=dict)
@@ -191,12 +225,15 @@ class Config:
         block_strategy = cls._validate_block_strategy(
             raw.get("block_strategy"), profile)
         chain = cls._validate_chain(raw.get("chain"))
+        oob = cls._validate_oob(raw.get("oob"), aggressiveness)
+        stealth = cls._validate_stealth(raw.get("stealth"), aggressiveness)
 
         return cls(
             path=path, program=program, nvd_api_key=nvd_key, scope=scope,
             limits=limits, proxy_file=proxy_file, interface=interface,
             aggressiveness=aggressiveness, rotation=rotation,
-            block_strategy=block_strategy, chain=chain,
+            block_strategy=block_strategy, chain=chain, oob=oob,
+            stealth=stealth,
             program_rules=program_rules, warnings=warnings, _raw=raw,
         )
 
@@ -352,6 +389,96 @@ class Config:
                     raise ConfigError(f"chain.{key} mənfi ola bilməz")
                 setattr(cc, key, val)
         return cc
+
+    @staticmethod
+    def _validate_oob(oob, aggressiveness: str) -> OOBConfig:
+        cfg = OOBConfig()
+        if aggressiveness == "passive":
+            cfg.enabled = True
+        if oob is None:
+            return cfg
+        if not isinstance(oob, dict):
+            raise ConfigError("oob mapping olmalıdır")
+        if "enabled" in oob:
+            if not isinstance(oob["enabled"], bool):
+                raise ConfigError("oob.enabled boolean olmalıdır")
+            cfg.enabled = oob["enabled"]
+        if oob.get("domain") is not None:
+            if not isinstance(oob["domain"], str):
+                raise ConfigError("oob.domain mətn olmalıdır")
+            cfg.domain = oob["domain"].strip()
+        if oob.get("listen_host") is not None:
+            if not isinstance(oob["listen_host"], str):
+                raise ConfigError("oob.listen_host mətn olmalıdır")
+            cfg.listen_host = oob["listen_host"]
+        if oob.get("listen_port") is not None:
+            val = oob["listen_port"]
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                raise ConfigError("oob.listen_port qeyri-mənfi tam ədəd olmalıdır")
+            cfg.listen_port = val
+        if oob.get("backend") is not None:
+            backend = str(oob["backend"]).lower()
+            if backend not in ("local", "interactsh"):
+                raise ConfigError(
+                    f"oob.backend {backend!r} etibarsızdır — local|interactsh")
+            cfg.backend = backend
+        if oob.get("wait") is not None:
+            val = oob["wait"]
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or val < 0:
+                raise ConfigError("oob.wait qeyri-mənfi rəqəm olmalıdır")
+            cfg.wait = float(val)
+        return cfg
+
+    @staticmethod
+    def _validate_stealth(stealth, aggressiveness: str) -> StealthConfig:
+        # Profil-əsaslı default-lar: passive → tam insan-təqlidi pacing;
+        # aggressive → minimal pacing (impersonation + rotation-a güvən).
+        defaults = {
+            "passive": ("chrome", "off", "passive"),
+            "normal": ("chrome", "off", "normal"),
+            "aggressive": ("chrome", "off", "aggressive"),
+        }
+        imp, prox, pace = defaults[aggressiveness]
+        cfg = StealthConfig(impersonate=imp, proxy_strategy=prox, pacing=pace)
+        if stealth is None:
+            return cfg
+        if not isinstance(stealth, dict):
+            raise ConfigError("stealth mapping olmalıdır")
+        if stealth.get("impersonate") is not None:
+            val = str(stealth["impersonate"]).lower()
+            if val not in IMPERSONATE_TARGETS:
+                raise ConfigError(
+                    f"stealth.impersonate {val!r} etibarsızdır — "
+                    f"{sorted(IMPERSONATE_TARGETS)}")
+            cfg.impersonate = val
+        if stealth.get("proxy_strategy") is not None:
+            val = str(stealth["proxy_strategy"]).lower()
+            if val not in PROXY_STRATEGIES:
+                raise ConfigError(
+                    f"stealth.proxy_strategy {val!r} etibarsızdır — "
+                    f"{sorted(PROXY_STRATEGIES)}")
+            cfg.proxy_strategy = val
+        if stealth.get("pacing") is not None:
+            val = str(stealth["pacing"]).lower()
+            if val not in PACING_PROFILES:
+                raise ConfigError(
+                    f"stealth.pacing {val!r} etibarsızdır — "
+                    f"{sorted(PACING_PROFILES)}")
+            cfg.pacing = val
+        for key in ("pacing_max_overhead",):
+            if stealth.get(key) is not None:
+                val = stealth[key]
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    raise ConfigError(f"stealth.{key} rəqəm olmalıdır")
+                if val < 1.0:
+                    raise ConfigError(f"stealth.{key} ən azı 1.0 olmalıdır")
+                setattr(cfg, key, float(val))
+        for key in ("waf_adapt", "tor_for_sensitive_only"):
+            if stealth.get(key) is not None:
+                if not isinstance(stealth[key], bool):
+                    raise ConfigError(f"stealth.{key} boolean olmalıdır")
+                setattr(cfg, key, stealth[key])
+        return cfg
 
     # ---------------- köməkçilər ----------------
     @property

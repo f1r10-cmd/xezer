@@ -26,14 +26,28 @@ from .engines.api_enum import APIEnumEngine
 from .engines.api_fuzz import APIFuzzEngine
 from .engines.content import ContentEngine
 from .engines.deep_enum import DeepEnumEngine
+from .engines.deepen import (
+    BBOTEngine,
+    DnstwistEngine,
+    GowitnessEngine,
+    WaymoreEngine,
+)
 from .engines.ferox import FeroxEngine
 from .engines.fingerprint import FingerprintEngine
 from .engines.jsanalysis import JSAnalysisEngine
+from .engines.jwt import JWTEngine
+from .engines.library_cve import LibraryCVEEngine
 from .engines.param_enum import ParamEnumEngine
 from .engines.race import RaceEngine
 from .engines.recon import ReconEngine
+from .engines.sourcecode import SourceCodeEngine
+from .engines.sqli import SQLiEngine
+from .engines.ssrf import SSRFEngine
+from .engines.ssti import SSTIEngine
 from .engines.validation import ValidationEngine
 from .engines.vuln import VulnEngine
+from .engines.wafdetect import WafDetectEngine
+from .engines.xss import XSSEngine
 from .http_policy import HttpPolicy
 from .installer import check_tools, format_report, install_tools
 from .report import generator
@@ -69,6 +83,7 @@ class Conductor:
             block_429=cfg.block_strategy.http_429,
             block_403=cfg.block_strategy.http_403,
         )
+        self.policy = policy
         self.proxies = ProxyManager(getattr(args, "proxy", "off"), cfg.proxy_file)
         self.identity = IdentityManager(
             cfg.proxy_file, cfg.interface, cfg.rotation,
@@ -86,6 +101,9 @@ class Conductor:
 
         self.ctx = Context(cfg=cfg, args=args, guardian=self.guardian,
                            scan_id=None, authorization=self.authorization)
+        # Faza 2.1: hədəfə gedən native HTTP trafiki TLS təqlidi transportundan
+        # keçir (curl_cffi yoxdursa transport `available=False` → aiohttp).
+        self.policy.transport = self.ctx.stealth.transport
 
     # ---------------- target + scope ----------------
     def resolve_targets(self) -> list[str]:
@@ -209,12 +227,26 @@ class Conductor:
             await self._run_stage(
                 "recon", t,
                 lambda t=t, subs=subs, recon=recon: recon.run(t, subs))
+            # Faza 1.2: recon dərinləşdirmə (alət yoxdursa honest skip).
+            await self._run_stage(
+                "bbot", t, lambda t=t: BBOTEngine(self.ctx).run(t))
+            await self._run_stage(
+                "waymore", t, lambda t=t: WaymoreEngine(self.ctx).run(t))
+            await self._run_stage(
+                "dnstwist", t, lambda t=t: DnstwistEngine(self.ctx).run(t))
+        # Skrinşot inventarı canlı hostlar yarandıqdan SONRA (Faza 1.2).
+        await self._run_stage("gowitness", "",
+                              lambda: GowitnessEngine(self.ctx).run())
 
     async def run_vuln(self) -> None:
         await self._ensure_tools()
 
         fp = FingerprintEngine(self.ctx)
         await self._run_stage("fingerprint", "", lambda: fp.run())
+
+        # Faza 2.2: WAF identikliyi — sonrakı stealth qərarlarını idarə edir.
+        await self._run_stage("wafdetect", "",
+                              lambda: WafDetectEngine(self.ctx).run())
 
         await asyncio.gather(
             self._run_stage("vuln", "", lambda: VulnEngine(self.ctx).run()),
@@ -229,12 +261,43 @@ class Conductor:
                               lambda: APIFuzzEngine(self.ctx).run())
         await self._run_stage("param_enum", "",
                               lambda: ParamEnumEngine(self.ctx).run())
+
+        # Faza 1.1: offensive mühərriklər (RoE + nərdivan qapısı ilə).
+        await self._run_offensive()
+
         await self._run_stage("race", "", lambda: RaceEngine(self.ctx).run())
         await self._run_stage("cve_intel", "", lambda: cve_intel.run(self.ctx))
+        # Faza 1.3: kitabxana CVE uyğunlaşdırması (OSV + KEV/EPSS).
+        await self._run_stage("library_cve", "",
+                              lambda: LibraryCVEEngine(self.ctx).run())
         await self._run_stage("validation", "",
                               lambda: ValidationEngine(self.ctx).run())
         # Faza 2: zəncirləmə — kəşfləri avtomatik test/təsdiqə bağlayır.
         await self._run_stage("chain", "", lambda: self._run_chain())
+
+    async def _run_offensive(self) -> None:
+        """Faza 1.1 offensive mühərrikləri — honest qapı ilə.
+
+        Qapılar: (1) RoE `active_fuzz`, (2) Guardian eskalasiya nərdivanı
+        (`defer_intrusive` → intrusiv fazalar təxirə salınır). Atlandıqda bu
+        AÇIQ şəkildə bildirilir — heç vaxt səssizcə "işlədi" deyilmir.
+        """
+        if not self.ctx.allows("active_fuzz"):
+            await self._run_stage("sqli", "", lambda: SQLiEngine(self.ctx).run())
+            await self._run_stage("xss", "", lambda: XSSEngine(self.ctx).run())
+            print("   [·] offensive mühərriklər: aktiv fuzz qadağandır (RoE)")
+            return
+        if not self.guardian.allows_intrusive():
+            print("   [·] offensive mühərriklər: Guardian nərdivanı intrusiv "
+                  "fazaları təxirə salıb")
+            return
+        await self._run_stage("sqli", "", lambda: SQLiEngine(self.ctx).run())
+        await self._run_stage("xss", "", lambda: XSSEngine(self.ctx).run())
+        await self._run_stage("ssti", "", lambda: SSTIEngine(self.ctx).run())
+        await self._run_stage("ssrf", "", lambda: SSRFEngine(self.ctx).run())
+        await self._run_stage("jwt", "", lambda: JWTEngine(self.ctx).run())
+        await self._run_stage("sourcecode", "",
+                              lambda: SourceCodeEngine(self.ctx).run())
 
     async def _run_chain(self):
         from .chain import ChainPipeline
@@ -259,6 +322,8 @@ class Conductor:
                     "config_warnings": list(self.cfg.warnings),
                     "block_audit": self.guardian.audit(),
                     "rotation_audit": self.guardian.rotation_audit(),
+                    "ladder": self.guardian.ladder_state(),
+                    "stealth": self.ctx.stealth.summary(),
                     "chain_audit": self.chain.audit() if self.chain else {},
                 })
         except Exception:  # noqa: BLE001 - hesabat yaradılmasa da pipeline bitməlidir
@@ -287,6 +352,16 @@ class Conductor:
         if summary.get("rotations"):
             print(f"  [↻] {summary['rotations']} identiklik rotasiyası "
                   f"(UA/başlıq/proxy rotasiyası konfiqurasiya ilə idarə olunur)")
+        ladder = summary.get("ladder") or {}
+        if ladder.get("level"):
+            print(f"  [🪜] Guardian nərdivanı: səviyyə {ladder['level']} "
+                  f"({ladder.get('action')})")
+        waf = self.ctx.stealth.waf
+        if waf.detected:
+            print(f"  [🛡] WAF: {waf.name} (güvən {waf.confidence:.2f})")
+        imp = self.ctx.stealth.summary().get("impersonate", {})
+        if not imp.get("available"):
+            print(f"  [i] TLS təqlidi əlçatan deyil: {imp.get('reason')}")
 
     async def _pipeline(self, mode: str, body) -> None:
         self.scan_id = db.start_scan(self.cfg.program, mode)
@@ -294,6 +369,7 @@ class Conductor:
         self.authorization.scan_id = self.scan_id
         status = "completed"
         try:
+            await self.ctx.oob.start()
             await body()
         except asyncio.CancelledError:
             self.authorization.cancel()
@@ -301,6 +377,7 @@ class Conductor:
             print("\n[!] İcra ləğv edildi (Ctrl+C) — yarımçıq nəticələr saxlanılır")
             raise
         finally:
+            await self.ctx.oob.stop()
             if status != "cancelled" and self.failed_stages:
                 status = "partial" if len(self.failed_stages) < len(self.stages) \
                     else "failed"

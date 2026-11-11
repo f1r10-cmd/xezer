@@ -193,3 +193,28 @@ def _dedupe(attempts: list[BypassAttempt]) -> list[BypassAttempt]:
         seen.add(key)
         out.append(a)
     return out
+
+
+def waf_matrix(url: str, waf_name: str = "", **kwargs) -> list[BypassAttempt]:
+    """WAF-şüurlu bypass matrisi (Faza 2.2).
+
+    Eyni tam matrisi qurur, lakin aşkarlanmış WAF üçün ÜSTÜN TUTULAN texnikaları
+    (məs. Cloudflare → `X-Forwarded-For`, upper-case path) siyahının başına
+    çəkir. `waf_name` boşdursa `build_matrix` ilə eynidir → heç bir səssiz
+    davranış dəyişikliyi yoxdur.
+    """
+    from .stealth.waf import encodings_for
+
+    matrix = build_matrix(url, **kwargs)
+    preferred = encodings_for(waf_name)
+    if not preferred:
+        return matrix
+
+    def rank(attempt: BypassAttempt) -> int:
+        label = attempt.label
+        for idx, pref in enumerate(preferred):
+            if label.endswith(pref) or pref in label:
+                return idx
+        return len(preferred)
+
+    return sorted(matrix, key=rank)

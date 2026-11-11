@@ -8,8 +8,8 @@ YALNIZ həm **implementasiya olunduqda**, həm də **test edildikdə** verilir.
 ```
 $ .venv/bin/python -m compileall -q qbh main.py   → COMPILE_OK
 $ .venv/bin/python -m ruff check --select E4,E7,E9,F,B,W .  → All checks passed!
-$ .venv/bin/python -m pytest                      → 242 passed
-$ .venv/bin/python -m pytest --cov=qbh            → TOTAL 51%
+$ .venv/bin/python -m pytest                      → 370 passed
+$ .venv/bin/python -m pytest --cov=qbh            → TOTAL 53%
 ```
 
 Bütün testlər **yalnız** `127.0.0.1`/`localhost` loopback fixture-larına qarşı
@@ -26,8 +26,11 @@ işləyir — **CI heç bir xarici hədəfə trafik göndərmir**.
 | **Rotation** | ✅ **PASS** | `test_rotation.py` (TestDeterministic, TestRotation: UA/başlıq/proxy, audit, `on_block=False`, `_validate_rotation`) | Determinizm + audit yoxlanılır |
 | **Adaptive rate handling** | ✅ **PASS** | `test_http_policy.py`: `test_403_triggers_cooldown_not_evasion`, `test_403_rotate_strategy_rotates_identity`, `test_403_escalate_bypass_sets_flag`, `test_403_rotate_impossible_falls_to_cooldown`, `test_429_rotate_strategy_rotates`, `test_429_honours_retry_after`, `test_repeated_blocks_grow_cooldown_capped` | 4 strategiya (respect/rotate/backoff_then_rotate/escalate_bypass) sınanır |
 | **Egress control** | ✅ **PASS** | `test_http_policy.py::test_request_out_of_scope_blocked`, `test_scope_check_happens_before_any_request`, `test_redirect_within_scope_followed`, `test_redirect_escape_blocked`; `test_scope.py` redirect escape testləri | Hər sorğu + hər redirect addımı yenidən avtorizasiya olunur; scope yoxlaması sorğudan ƏVVƏL |
-| **Cancellation** | ✅ **PASS** | `test_authorization.py::TestCancellationAndDeadline` (cancel, canceller Event, deadline keçmiş/gələcək, summary); `test_http_policy.py::test_cancellation_propagates` | `ensure_active()` uzun əməliyyatlardan əvvəl çağırılır |
-| **DB migration** | ✅ **PASS** | `test_lifecycle.py::TestMigration` (köhnə `potential/verified/false-positive` bazası → v3), `TestNormalizeStatus` (`SCHEMA_VERSION==3`), `test_db.py` | Cədvəl → `_migrate` → indeks sırası; məlumat itmir |
+| **Subprocess egress (Faza 0.2)** | ✅ **PASS** | `test_egress.py` (TestAuthorizeProcessTargets, TestTargetFile, TestDnsPinning: TTL keş/xarici xəta, TestProcessKill: timeout/ehtiva/killpg/uşaq, TestFailClosed) | Bütün subprocess hədəfləri `EgressController.authorize_process_targets()`-dən keçir; DNS pinning + qrup SIGKILL + audit. Tam per-request nəzarət üçün OS sandbox tələb olunur — sənədləşdirilib |
+| **Scan izolyasiyası (Faza 0.1)** | ✅ **PASS** | `test_scan_isolation.py` (TestScanIsolation, TestLegacyIsolation, TestEngineQueryPaths, TestMigrationV4: v3→v4 id qorunması, idempotentlik) | `hosts.scan_id NOT NULL` + `UNIQUE(scan_id, subdomain)`; köhnə qeydlər `LEGACY_SCAN_ID=0` alır və yeni skanın hədəfi ola bilməz |
+| **OpenAPI servers scope (Faza 0.3)** | ✅ **PASS** | `test_api_fuzz.py` (TestEffectiveServers, TestValidateServers, TestEngineGuard) | `servers:` dəyişən əvəzindən SONRA genişləndirilir; hər URL `authorize_url()`-dən keçir; icazəsiz server rədd + log (səssiz əvəz yox) |
+| **Cancellation** | ✅ **PASS** | `test_authorization.py::TestCancellationAndDeadline` (cancel, canceller Event, deadline keçmiş/gələcək, summary); `test_http_policy.py::test_cancellation_propagates`; `test_egress.py::TestProcessKill` | `ensure_active()` uzun əməliyyatlardan əvvəl çağırılır; cancel → proses qrupuna SIGKILL |
+| **DB migration** | ✅ **PASS** | `test_lifecycle.py::TestMigration` (köhnə `potential/verified/false-positive` bazası → v4), `TestNormalizeStatus` (`SCHEMA_VERSION==4`), `test_db.py`, `test_scan_isolation.py::TestMigrationV4` | Cədvəl → `_rebuild_hosts_v4` → `_migrate` → indeks sırası; məlumat itmir (id qorunur, köhnə hostlar `legacy`) |
 
 ---
 
@@ -87,6 +90,6 @@ idarə olunur; proqram qaydası (`program_rules.forbidden`) onlardan üstündür
 
 ## 4. Nəticə
 
-- 7 əsas sahədən **6-sı PASS**, **1-i PARTIAL** (Chaining).
+- Əsas cədvəldəki 10 sahədən **9-u PASS**, **1-i PARTIAL** (Chaining).
 - Əlavə 8 acceptance sahəsindən **7-si PASS**, **1-i PARTIAL**.
 - Heç bir PASS sətri test olmadan verilməmişdir.

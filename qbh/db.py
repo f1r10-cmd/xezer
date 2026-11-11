@@ -16,7 +16,17 @@ import threading
 from datetime import datetime, timezone
 
 DB_PATH = "findings.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
+
+#: Miqrasiya olunmuş (v3 və əvvəlki) sətirlərə verilən "legacy" scan id-si.
+#: Bu dəyər HEÇ VAXT aktiv skanın hədəfi ola bilməz — `alive_hosts(scan_id)`
+#: yalnız konkret scan_id ilə süzür. Real skan id-ləri 1-dən başlayır.
+LEGACY_SCAN_ID = 0
+
+
+def effective_scan_id(scan_id) -> int:
+    """`None` → legacy sentinel; əks halda tam ədəd."""
+    return LEGACY_SCAN_ID if scan_id is None else int(scan_id)
 
 #: Tapıntı həyat dövrü (Faza 2/5). Kandidat → təsdiqlənmiş/rədd edilmiş →
 #: hesabatda göstərilmiş.
@@ -77,23 +87,27 @@ CREATE TABLE IF NOT EXISTS scans (
 );
 CREATE TABLE IF NOT EXISTS hosts (
   id INTEGER PRIMARY KEY,
-  subdomain TEXT NOT NULL UNIQUE,
+  scan_id INTEGER NOT NULL DEFAULT 0,
+  subdomain TEXT NOT NULL,
   ip TEXT, real_ip TEXT, cdn TEXT,
   status_code INTEGER, title TEXT, tech_raw TEXT,
   strategy TEXT DEFAULT 'generic',
   source TEXT,
   halted INTEGER DEFAULT 0,
-  created_at TEXT, updated_at TEXT
+  created_at TEXT, updated_at TEXT,
+  UNIQUE(scan_id, subdomain)
 );
 CREATE TABLE IF NOT EXISTS urls (
   id INTEGER PRIMARY KEY,
+  scan_id INTEGER NOT NULL DEFAULT 0,
   host_id INTEGER REFERENCES hosts(id) ON DELETE CASCADE,
   url TEXT NOT NULL, source TEXT, is_js INTEGER DEFAULT 0,
   found_at TEXT,
-  UNIQUE(host_id, url)
+  UNIQUE(scan_id, host_id, url)
 );
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY,
+  scan_id INTEGER NOT NULL DEFAULT 0,
   host_id INTEGER REFERENCES hosts(id) ON DELETE CASCADE,
   module TEXT NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL,
   description TEXT, evidence TEXT, curl_repro TEXT, template TEXT,
@@ -101,7 +115,8 @@ CREATE TABLE IF NOT EXISTS findings (
   status TEXT DEFAULT 'candidate',
   source TEXT,
   fingerprint TEXT,
-  first_seen TEXT, last_seen TEXT
+  first_seen TEXT, last_seen TEXT,
+  UNIQUE(scan_id, fingerprint)
 );
 CREATE TABLE IF NOT EXISTS evidence (
   id INTEGER PRIMARY KEY,
@@ -156,11 +171,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
 # Köhnə bazalara təhlükəsiz sütun əlavələri
 _EXPECTED_COLUMNS = {
     "hosts": {
+        "scan_id": "INTEGER NOT NULL DEFAULT 0",
         "halted": "INTEGER DEFAULT 0",
         "updated_at": "TEXT",
         "source": "TEXT",
     },
     "findings": {
+        "scan_id": "INTEGER NOT NULL DEFAULT 0",
         "confidence": "REAL DEFAULT 0.5",
         "status": "TEXT DEFAULT 'potential'",
         "source": "TEXT",
@@ -172,7 +189,9 @@ _EXPECTED_COLUMNS = {
         "match_type": "TEXT DEFAULT 'possible'",
         "source": "TEXT",
     },
-    "urls": {},
+    "urls": {
+        "scan_id": "INTEGER NOT NULL DEFAULT 0",
+    },
 }
 
 
@@ -200,18 +219,71 @@ def _migrate(conn: sqlite3.Connection):
         (str(SCHEMA_VERSION),))
 
 
+def _rebuild_hosts_v4(conn: sqlite3.Connection) -> bool:
+    """v3 → v4: `hosts` cədvəlini `scan_id` + `UNIQUE(scan_id, subdomain)` ilə
+    yenidən qurur.
+
+    Nə üçün rebuild: SQLite `UNIQUE(subdomain)` məhdudiyyətini `ALTER TABLE`
+    ilə dəyişmək mümkün deyil. Köhnə sətirlərə `scan_id = LEGACY_SCAN_ID (0)`
+    verilir → onlar YENİ skanların aktiv hədəfi ola bilməz, lakin tarixi
+    hesabat üçün əlçatan qalır. Uşaq cədvəllər (urls/findings/...) `hosts.id`-ə
+    istinad etdiyi üçün FK müvəqqəti söndürülür və id-lər QORUNUR.
+
+    `True` qaytarır, əgər rebuild baş verdisə.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(hosts)").fetchall()}
+    if not cols or "scan_id" in cols:
+        return False
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            "CREATE TABLE hosts_v4 ("
+            " id INTEGER PRIMARY KEY,"
+            " scan_id INTEGER NOT NULL DEFAULT 0,"
+            " subdomain TEXT NOT NULL,"
+            " ip TEXT, real_ip TEXT, cdn TEXT,"
+            " status_code INTEGER, title TEXT, tech_raw TEXT,"
+            " strategy TEXT DEFAULT 'generic', source TEXT,"
+            " halted INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT,"
+            " UNIQUE(scan_id, subdomain))")
+        conn.execute(
+            "INSERT INTO hosts_v4(id,scan_id,subdomain,ip,real_ip,cdn,"
+            "status_code,title,tech_raw,strategy,source,halted,"
+            "created_at,updated_at) "
+            "SELECT id, ?, subdomain, ip, real_ip, cdn, status_code, title,"
+            "tech_raw, strategy, source, halted, created_at, updated_at "
+            "FROM hosts", (LEGACY_SCAN_ID,))
+        conn.execute("DROP TABLE hosts")
+        conn.execute("ALTER TABLE hosts_v4 RENAME TO hosts")
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+    return True
+
+
 def init_db():
     """Cədvəlləri yaradır, köhnə bazaları miqrasiya edir, sonra indeksləri qurur.
 
-    Sıra VACİBDİR: əvvəl cədvəllər → sonra çatışmayan sütunlar (`_migrate`)
-    → ən sonda indekslər. Beləliklə köhnə baza da açıla bilir və HEÇ BİR
-    istifadəçi datası silinmir.
+    Sıra VACİBDİR: əvvəl cədvəllər → sonra hosts rebuild (v4) → çatışmayan
+    sütunlar (`_migrate`) → ən sonda indekslər. Beləliklə köhnə baza da açıla
+    bilir və HEÇ BİR istifadəçi datası silinmir. Miqrasiya boyu avtocommit
+    rejimi istifadə olunur ki, `PRAGMA foreign_keys` effektiv olsun.
     """
     conn = get_db()
-    with conn:
+    prev_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit → PRAGMA foreign_keys işləyir
+    try:
         conn.executescript(SCHEMA_TABLES)
+        _rebuild_hosts_v4(conn)
         _migrate(conn)
         conn.executescript(SCHEMA_INDEXES)
+    finally:
+        conn.isolation_level = prev_isolation
 
 
 def start_scan(program: str, mode: str) -> int:
@@ -246,35 +318,39 @@ def record_stage(scan_id: int | None, target: str, module: str, status: str,
              errors, warnings))
 
 
-def upsert_host(subdomain: str, **kw) -> int:
+def upsert_host(subdomain: str, scan_id=None, **kw) -> int:
+    """Hostu cari skanın altında yaradır/yeniləyir.
+
+    `scan_id=None` → `LEGACY_SCAN_ID` (skan konteksti olmayan çağırışlar).
+    `UNIQUE(scan_id, subdomain)` sayəsində eyni host iki fərqli skanda AYRI
+    sətir kimi saxlanılır → skanlar bir-birinin hostlarına qarışmır.
+    """
+    sid = effective_scan_id(scan_id)
     conn = get_db()
     kw = {k: v for k, v in kw.items() if v is not None}
+    data = {"scan_id": sid, **kw}
     with conn:
-        if kw:
-            cols = ", ".join(kw.keys())
-            qs = ", ".join(["?"] * len(kw))
-            conn.execute(
-                f"INSERT INTO hosts(subdomain, {cols}, created_at, updated_at) "
-                f"VALUES(?, {qs}, ?, ?) "
-                f"ON CONFLICT(subdomain) DO UPDATE SET "
-                f"{', '.join(f'{k}=excluded.{k}' for k in kw)}, "
-                f"updated_at=excluded.updated_at",
-                [subdomain, *kw.values(), _now(), _now()])
-        else:
-            conn.execute(
-                "INSERT OR IGNORE INTO hosts(subdomain, created_at, updated_at) "
-                "VALUES(?,?,?)", (subdomain, _now(), _now()))
-    row = conn.execute("SELECT id FROM hosts WHERE subdomain=?",
-                       (subdomain,)).fetchone()
-    return row["id"]
+        cols = ", ".join(data.keys())
+        qs = ", ".join(["?"] * len(data))
+        conn.execute(
+            f"INSERT INTO hosts(subdomain, {cols}, created_at, updated_at) "
+            f"VALUES(?, {qs}, ?, ?) "
+            f"ON CONFLICT(scan_id, subdomain) DO UPDATE SET "
+            f"{', '.join(f'{k}=excluded.{k}' for k in data)}, "
+            f"updated_at=excluded.updated_at",
+            [subdomain, *data.values(), _now(), _now()])
+    row = conn.execute("SELECT id FROM hosts WHERE subdomain=? AND scan_id=?",
+                       (subdomain, sid)).fetchone()
+    return row["id"] if row else -1
 
 
-def insert_url(host_id: int, url: str, source: str, is_js: bool = False):
+def insert_url(host_id: int, url: str, source: str, is_js: bool = False, scan_id=None):
+    sid = effective_scan_id(scan_id)
     conn = get_db()
     with conn:
         conn.execute(
-            "INSERT OR IGNORE INTO urls(host_id,url,source,is_js,found_at) "
-            "VALUES(?,?,?,?,?)", (host_id, url, source, int(is_js), _now()))
+            "INSERT OR IGNORE INTO urls(scan_id,host_id,url,source,is_js,found_at) "
+            "VALUES(?,?,?,?,?,?)", (sid, host_id, url, source, int(is_js), _now()))
 
 
 def _fingerprint(host_id: int, module: str, title: str, evidence: str) -> str:
@@ -285,7 +361,8 @@ def _fingerprint(host_id: int, module: str, title: str, evidence: str) -> str:
 def insert_finding(host_id: int, module: str, severity: str, title: str,
                    description: str = "", evidence: str = "", curl_repro: str = "",
                    template: str = "", *, confidence: float = 0.5,
-                   status: str = "candidate", source: str = "") -> int:
+                   status: str = "candidate", source: str = "", scan_id=None) -> int:
+    sid = effective_scan_id(scan_id)
     severity = (severity or "info").lower()
     status = normalize_status(status)
     fp = _fingerprint(host_id, module, title, evidence or "")
@@ -294,12 +371,12 @@ def insert_finding(host_id: int, module: str, severity: str, title: str,
         # `RETURNING id` — təkrar (ON CONFLICT) halında da HƏQİQİ sətri qaytarır.
         # (lastrowid təkrar halında köhnə/dəyişmiş qiymət verə bilər → səhv id.)
         cur = conn.execute(
-            "INSERT INTO findings(host_id,module,severity,title,description,"
+            "INSERT INTO findings(scan_id,host_id,module,severity,title,description,"
             "evidence,curl_repro,template,confidence,status,source,fingerprint,"
-            "first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(fingerprint) DO UPDATE SET last_seen=excluded.last_seen "
+            "first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(scan_id, fingerprint) DO UPDATE SET last_seen=excluded.last_seen "
             "RETURNING id",
-            (host_id, module, severity, title, description, evidence,
+            (sid, host_id, module, severity, title, description, evidence,
              curl_repro, template, confidence, status, source, fp, _now(), _now()))
         row = cur.fetchone()
     return row["id"] if row else -1
@@ -372,10 +449,11 @@ def all_evidence():
     return get_db().execute("SELECT * FROM evidence ORDER BY id").fetchall()
 
 
-def findings_by_status(status: str):
+def findings_by_status(status: str, scan_id=None):
+    sid = effective_scan_id(scan_id)
     return get_db().execute(
-        "SELECT * FROM findings WHERE status=? ORDER BY id",
-        (normalize_status(status),)).fetchall()
+        "SELECT * FROM findings WHERE status=? AND scan_id=? ORDER BY id",
+        (normalize_status(status), sid)).fetchall()
 
 
 def upsert_validated(finding_id: int, passed: bool | None, note: str = ""):
@@ -396,17 +474,29 @@ def halt_host(host_id: int, val: bool = True):
         conn.execute("UPDATE hosts SET halted=? WHERE id=?", (int(val), host_id))
 
 
-def alive_hosts(include_halted: bool = False):
-    """status_code məlum olan hostlar (defolt: dayandırılmışlar istisna)."""
-    sql = "SELECT * FROM hosts WHERE status_code IS NOT NULL"
+def alive_hosts(scan_id=None, include_halted: bool = False):
+    """Cari skanın status_code-u məlum hostları.
+
+    YALNIZ həmin `scan_id`-ə aid hostlar qaytarılır → əvvəlki skanın
+    hədəfləri yeni skanda AVTOMATİK yenidən skan edilə bilməz. Miqrasiya
+    olunmuş "legacy" sətirlər (`scan_id=0`) heç vaxt bura düşmür
+    (real skan id-ləri ≥ 1).
+    """
+    sid = effective_scan_id(scan_id)
+    sql = "SELECT * FROM hosts WHERE scan_id=? AND status_code IS NOT NULL"
+    params: list = [sid]
     if not include_halted:
         sql += " AND (halted IS NULL OR halted=0)"
-    return get_db().execute(sql).fetchall()
+    return get_db().execute(sql, params).fetchall()
 
 
-def all_hosts():
-    return get_db().execute("SELECT * FROM hosts").fetchall()
+def all_hosts(scan_id=None):
+    """Conkret skanın bütün hostları (default: legacy qrupu)."""
+    sid = effective_scan_id(scan_id)
+    return get_db().execute(
+        "SELECT * FROM hosts WHERE scan_id=?", (sid,)).fetchall()
 
 
-def findings_all():
-    return get_db().execute("SELECT * FROM findings").fetchall()
+def findings_all(scan_id=None):
+    sid = effective_scan_id(scan_id)
+    return get_db().execute("SELECT * FROM findings WHERE scan_id=?", (sid,)).fetchall()

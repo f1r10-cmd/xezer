@@ -58,7 +58,7 @@ class VulnEngine:
 
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
-        hosts = db.alive_hosts()
+        hosts = db.alive_hosts(self.ctx.scan_id)
         if not hosts:
             return res.skip("yaşayan host yoxdur — nuclei atlandı")
         print(f"[═══ M3 VULN ENGINE ═══] {len(hosts)} host")
@@ -86,6 +86,19 @@ class VulnEngine:
 
     async def _scan(self, hosts: list, strategy: str, res: EngineResult):
         tags = STRATEGY_TAGS.get(strategy, []) or GENERIC_TAGS
+        # Faza 0.2: alt-prosesə verilən BÜTÜN hədəflər əvvəlcə egress
+        # validasiyasından (scope + DNS pinning) keçir. Scope xarici hostlar
+        # hədəf faylına DÜŞMÜR.
+        tset = await self.ctx.egress.authorize_process_targets(
+            [f"https://{h['subdomain']}" for h in hosts])
+        if tset.rejected:
+            res.warn(f"egress: {len(tset.rejected)} scope-xarici hədəf "
+                     f"rədd edildi (nuclei-yə verilmir)")
+        authorized = set(tset.hostnames)
+        hosts = [h for h in hosts if h["subdomain"] in authorized]
+        if not hosts:
+            res.warn(f"egress: strategy={strategy} üçün icazəli hədəf yoxdur")
+            return
         targets = [f"https://{h['subdomain']}" for h in hosts]
         host_map = {h["subdomain"]: h["id"] for h in hosts}
 
@@ -147,7 +160,7 @@ class VulnEngine:
                 evidence=matched,
                 curl_repro=str(r.get("curl-command") or ""),
                 template=str(r.get("template-id") or ""),
-                confidence=0.7, source="nuclei")
+                confidence=0.7, source="nuclei", scan_id=self.ctx.scan_id)
             n += 1
             res.findings += 1
             mark = "🔴" if severity in ("high", "critical") else "🟡"

@@ -45,7 +45,7 @@ qbh-xazar/
 │   ├── context.py              # Context dataclass
 │   ├── results.py              # EngineResult, StageResult
 │   ├── redact.py               # secret maskalama
-│   ├── db.py                   # SQLite sxem (v3) + miqrasiya + dedup + evidence
+│   ├── db.py                   # SQLite sxem (v4) + miqrasiya + dedup + evidence
 │   ├── installer.py            # tool aşkarlama/quraşdırma
 │   ├── conductor.py            # orkestrasiya
 │   ├── antiblock/
@@ -104,10 +104,12 @@ Mühərriklərə ötürülən paylaşılan vəziyyət: `cfg`, `args`, `guardian`
 Hər mühərrik `(ctx)` qəbul edir və `run(...) -> EngineResult` təmin edir.
 Bütün HTTP əməliyyatları Guardian/HttpPolicy üzərindən keçir; subprocess
 icrası `adapters/base.run_process` vasitəsilə (`shell=False`) aparılır.
+Subprocess hədəfləri əvvəlcə `qbh/egress.EgressController`-dən keçir
+(scope validasiyası + DNS pinning + proses qrupu SIGKILL + audit).
 
 ### 6. Baza (`qbh/db.py`)
 
-- Açıq sxem + `SCHEMA_VERSION` (hazırda 2) + `_migrate()` ilə təhlükəsiz
+- Açıq sxem + `SCHEMA_VERSION` (hazırda 4) + `_migrate()` ilə təhlükəsiz
   sütun əlavələri (mövcud data silinmir).
 - `init_db()` sırası: **cədvəllər → `_migrate` → indekslər**. İndekslər
   `fingerprint` sütunundan asılıdır və köhnə bazalarda bu sütun sonradan

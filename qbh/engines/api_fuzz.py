@@ -3,23 +3,32 @@
 Təhlükəsizlik prinsipləri:
   * YALNIZ `--active-fuzz` açıq şəkildə verildikdə işləyir. Default: atlanır.
   * Yalnız GET metodları yoxlanır (`-M GET`) → state dəyişən sorğu yoxdur.
-  * Yalnız scope-daxili və API sxemi olduğu təsdiqlənmiş URL-lərə qarşı işləyir.
-  * Nəticələr "potential" kimi qeyd olunur; avtomatik "confirmed" iddiası yoxdur.
+  * YALNIZ cari skanın (`scan_id`) hostlarına aid sxemlər emal olunur.
+  * **Sənədin `servers:` bölməsi də validasiya olunur** — dəyişənlər əvəz
+    edildikdən və nisbi URL-lər sənədin əsasına görə həll olunduqdan SONRA
+    hər server `authorize_url()` ilə yoxlanılır. Scope xarici serverlər RƏDD
+    edilir və loglanır (səssizcə əvəzlənmir). Schemathesis yalnız təsdiqlənmiş
+    baza URL-lərini (`--base-url`) alır.
+  * Nəticələr "candidate" kimi qeyd olunur; avtomatik "confirmed" iddiası yoxdur.
   * Credential hücumu, brute force və data extraction YOXDUR.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
+from urllib.parse import urljoin, urlsplit
 
 from .. import db
 from ..adapters.base import run_process
 from ..results import EngineResult
+from ..scope import ScopeError
 
 MAX_SCHEMAS = 10
 MAX_EXAMPLES = 50
 TIMEOUT = 900
+MAX_SERVERS = 20
 
 
 class APIFuzzEngine:
@@ -40,8 +49,8 @@ class APIFuzzEngine:
             "SELECT u.url, u.host_id, h.subdomain FROM urls u "
             "JOIN hosts h ON h.id=u.host_id "
             "WHERE (u.url LIKE '%openapi%' OR u.url LIKE '%swagger%' "
-            "OR u.url LIKE '%api-docs%') LIMIT ?",
-            (MAX_SCHEMAS,)).fetchall()
+            "OR u.url LIKE '%api-docs%') AND h.scan_id=? LIMIT ?",
+            (db.effective_scan_id(self.ctx.scan_id), MAX_SCHEMAS)).fetchall()
         if not rows:
             return res.skip("OpenAPI sxem tapılmadı — API fuzzinq atlandı")
         print(f"[═══ API FUZZ (Schemathesis, GET-only) ═══] {len(rows)} sxem")
@@ -53,12 +62,90 @@ class APIFuzzEngine:
             await self._schemathesis(row, res)
         return res
 
+    # ----------------------------------------------------- server validasiyası
+    @staticmethod
+    def effective_servers(doc, doc_url: str) -> list[str]:
+        """Sənədin `servers:` siyahısını ABSOLYUT URL-lərə çevirir.
+
+        Dəyişənlər `variables[*].default` ilə əvəz olunur; nisbi URL-lər
+        sənədin öz ünvanına (`doc_url`) görə həll olunur. Həll olunmamış
+        dəyişən qalan server etibarsız sayılır və atılır. `servers` boşdursa
+        OpenAPI default-u (sənədin öz hostu, kök yol) istifadə olunur.
+        """
+        raw = doc.get("servers") if isinstance(doc, dict) else None
+        servers: list[str] = []
+        if isinstance(raw, list):
+            for s in raw[:MAX_SERVERS]:
+                if not isinstance(s, dict):
+                    continue
+                url = str(s.get("url") or "").strip()
+                if not url:
+                    continue
+                variables = s.get("variables")
+                if isinstance(variables, dict):
+                    for name, spec in variables.items():
+                        default = ""
+                        if isinstance(spec, dict):
+                            default = str(spec.get("default") or "")
+                        url = url.replace("{" + str(name) + "}", default)
+                if "{" in url or "}" in url:
+                    continue  # həll olunmamış dəyişən → etibarsız
+                servers.append(urljoin(doc_url, url))
+        if not servers:
+            servers.append(urljoin(doc_url, "/"))
+        out: list[str] = []
+        for s in servers:
+            if urlsplit(s).scheme in ("http", "https"):
+                out.append(s)
+        return out
+
+    @classmethod
+    def validate_servers(cls, doc, doc_url: str, authorize) -> tuple[list, list]:
+        """Server URL-lərini `authorize(url)` ilə süzür.
+
+        `authorize` — `ctx.authorize_url` (scope xaricində `ScopeError` atır).
+        Qaytarır: (icazəli_url-lər, rədd_edilmişlər[(url, səbəb)]).
+        """
+        good: list[str] = []
+        bad: list[tuple[str, str]] = []
+        for s in cls.effective_servers(doc, doc_url):
+            try:
+                authorize(s)
+                good.append(s)
+            except ScopeError as exc:
+                bad.append((s, str(exc)))
+        return good, bad
+
     async def _schemathesis(self, row, res: EngineResult) -> None:
+        doc = await self._fetch_document(row["url"])
+        if doc is None:
+            res.warn(f"sxem oxuna bilmədi: {row['url']}")
+            return
+        good, bad = self.validate_servers(doc, row["url"], self.ctx.authorize_url)
+        if bad:
+            res.warn(f"{row['subdomain']}: {len(bad)} scope-xarici server "
+                     f"rədd edildi ({', '.join(u for u, _ in bad[:3])})")
+        if not good:
+            res.warn(f"{row['subdomain']}: heç bir scope-daxili server yoxdur "
+                     f"— sxem atlandı")
+            return
+        for base in good:
+            await self._run_one(row, base, res)
+
+    async def _run_one(self, row, base_url: str, res: EngineResult) -> None:
+        # Faza 0.2: schemathesis hədəfləri (sənəd + baza URL) egress
+        # validasiyasından keçir (scope + DNS pinning).
+        tset = await self.ctx.egress.authorize_process_targets(
+            [row["url"], base_url])
+        if base_url not in tset.urls:
+            res.warn(f"egress: {base_url} scope xaricindədir — atlandı")
+            return
         fd, result_file = tempfile.mkstemp(prefix="qbh_st_", suffix=".json")
         os.close(fd)
         try:
             proc = await run_process([
                 "schemathesis", "run", row["url"],
+                "--base-url", base_url,
                 "-M", "GET",
                 "--checks", "all",
                 "--max-examples", str(MAX_EXAMPLES),
@@ -68,7 +155,7 @@ class APIFuzzEngine:
                 res.warn("schemathesis tapılmadı (pip install schemathesis)")
                 return
             if proc.timed_out:
-                res.warn(f"schemathesis {row['url']}: timeout")
+                res.warn(f"schemathesis {base_url}: timeout")
             failures = self._read_failures(result_file)
         finally:
             try:
@@ -80,13 +167,31 @@ class APIFuzzEngine:
             db.insert_finding(
                 row["host_id"], "apifuzz", "medium",
                 f"API property-test: {failures} nasazlıq",
-                f"Schemathesis {row['url']} sxemində {failures} yoxlama "
-                f"uyğunsuzluğu tapdı (yalnız GET). Bu POTENSIAL siqnaldır — "
-                f"manual təsdiq tələb olunur.",
-                evidence=row["url"], confidence=0.4,
-                status="potential", source="schemathesis")
+                f"Schemathesis {base_url} (sxem: {row['url']}) üzərində "
+                f"{failures} yoxlama uyğunsuzluğu tapdı (yalnız GET). Bu "
+                f"POTENSIAL siqnaldır — manual təsdiq tələb olunur.",
+                evidence=base_url, confidence=0.4,
+                status="candidate", source="schemathesis", scan_id=self.ctx.scan_id)
             res.findings += 1
-            print(f"[🧪] {row['subdomain']}: {failures} failure (potential)")
+            print(f"[🧪] {row['subdomain']}: {failures} failure (candidate)")
+
+    async def _fetch_document(self, url: str):
+        """Sxem sənədini yükləyir (yalnız artıq scope-daxili təsdiqlənmiş URL)."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    if r.status != 200:
+                        return None
+                    text = await r.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
 
     @staticmethod
     def _read_failures(result_file: str) -> int:

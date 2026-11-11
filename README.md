@@ -1,4 +1,4 @@
-# 🎯 QBH — Qarabug Autonomous Hunter v2.2 "Xəzər"
+# 🎯 QBH — Qarabug Autonomous Hunter v3.0 "Xəzər"
 
 Bug bounty hədəfləri üzərində **maksimum tapıntı** çıxaran, **yalnız icazəli
 scope daxilində** işləyən offensive recon və zəiflik aşkarlama platforması.

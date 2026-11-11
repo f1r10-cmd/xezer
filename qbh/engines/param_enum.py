@@ -41,7 +41,8 @@ class ParamEnumEngine:
             "JOIN hosts h ON h.id = u.host_id "
             "WHERE u.is_js = 0 AND u.source IN "
             "('katana','gau','ffuf','ferox','api-enum','kiterunner') "
-            "AND u.url NOT LIKE '%##%' LIMIT ?", (MAX_URLS,)).fetchall()
+            "AND u.url NOT LIKE '%##%' AND h.scan_id=? LIMIT ?",
+            (db.effective_scan_id(self.ctx.scan_id), MAX_URLS)).fetchall()
         if not rows:
             return res.skip("uyğun URL yoxdur — param enum atlandı")
         print(f"[═══ PARAM ENUM (Arjun + x8) ═══] {len(rows)} URL")
@@ -49,6 +50,11 @@ class ParamEnumEngine:
         for row in rows:
             if not self.cfg.in_scope(row["url"]):
                 res.warn(f"scope xaricində URL atlandı: {row['url']}")
+                continue
+            # Faza 0.2: alt-prosesə verilən URL egress validasiyasından keçir.
+            tset = await self.ctx.egress.authorize_process_targets([row["url"]])
+            if row["url"] not in tset.urls:
+                res.warn(f"egress: {row['url']} scope xaricindədir — atlandı")
                 continue
             if self.guardian:
                 if self.guardian.halted(row["subdomain"]):
@@ -79,10 +85,10 @@ class ParamEnumEngine:
             f"{row['url']} üzərində {len(params)} gizli GET parametri tapıldı "
             f"(sonrakı manual testlər üçün prioritet siyahı).",
             evidence=row["url"], confidence=0.5, status="potential",
-            source="arjun")
+            source="arjun", scan_id=self.ctx.scan_id)
         db.insert_url(row["host_id"],
                       f"{row['url']}##params:{','.join(params)}",
-                      "priority-param", False)
+                      "priority-param", False, scan_id=self.ctx.scan_id)
         res.findings += 1
         print(f"[+] {row['subdomain']}: parametrlər → {params}")
 
@@ -120,6 +126,6 @@ class ParamEnumEngine:
             f"{row['url']} — x8 nəticələri manual yoxlanış tələb edir "
             f"(yalnız GET, heuristik).",
             evidence=redact("\n".join(lines)), confidence=0.3,
-            status="potential", source="x8")
+            status="potential", source="x8", scan_id=self.ctx.scan_id)
         res.findings += 1
         print(f"[?] {row['subdomain']}: x8 siqnal verdi")

@@ -34,6 +34,12 @@ class DeepEnumEngine:
         except ScopeError as exc:
             res.fail(f"scope xaricində hədəf rədd edildi: {exc}")
             return res
+        # Faza 0.2: subprocess mənbələrinə (subfinder/amass/alterx/dnsx) verilən
+        # hədəf egress validasiyasından keçir + DNS pinning audit-i aparılır.
+        tset = await self.ctx.egress.authorize_process_targets([domain])
+        if domain not in set(tset.hostnames):
+            res.fail(f"egress: {domain} icazəli deyil")
+            return res
         print(f"[═══ M1+ DEEP ENUM ═══] {domain}")
 
         labels = ("subfinder", "amass", "crt.sh", "alterx")
@@ -73,7 +79,8 @@ class DeepEnumEngine:
         await self._dns_resolve(sorted(valid))
 
         for host, srcs in valid.items():
-            db.upsert_host(host, source=",".join(sorted(srcs)))
+            db.upsert_host(host, self.ctx.scan_id,
+                           source=",".join(sorted(srcs)))
         res.hosts = len(valid)
         res.data["subdomains"] = set(valid) | {domain}
         print(f"[+] Ümumi unikal, scope-daxili subdomain: {len(valid)}")
@@ -172,5 +179,6 @@ class DeepEnumEngine:
             cname = str(r.get("cname") or "").lower()
             db.upsert_host(
                 host,
+                self.ctx.scan_id,
                 ip=a[0] if a else None,
                 cdn="cloudflare" if "cloudflare" in cname else None)

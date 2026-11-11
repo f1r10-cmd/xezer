@@ -44,7 +44,7 @@ class FeroxEngine:
             return res.skip(
                 f"wordlist yoxdur: {FEROX_WORDLIST} (apt install seclists)")
 
-        hosts = db.alive_hosts()[:MAX_HOSTS]
+        hosts = db.alive_hosts(self.ctx.scan_id)[:MAX_HOSTS]
         if not hosts:
             return res.skip("yaşayan host yoxdur — ferox atlandı")
         print(f"[═══ M5+ FEROX (recursive, depth={MAX_DEPTH}) ═══] {len(hosts)} host")
@@ -64,6 +64,12 @@ class FeroxEngine:
 
     async def _scan(self, host_row, res: EngineResult) -> None:
         host = host_row["subdomain"]
+        # Faza 0.2: alt-proses hədəfi scope yoxlaması + DNS pinning-dən keçir.
+        tset = await self.ctx.egress.authorize_process_targets(
+            [f"https://{host}"])
+        if host not in set(tset.hostnames):
+            res.warn(f"egress: {host} scope xaricindədir — ferox atlandı")
+            return
         wordlist, tmp_words = limited_wordlist(FEROX_WORDLIST, MAX_WORDS)
         if tmp_words:
             res.warn(f"{host}: wordlist {MAX_WORDS} sətrə məhdudlaşdırıldı")
@@ -121,7 +127,7 @@ class FeroxEngine:
                 if not self.cfg.in_scope(url):  # scope yoxlaması
                     res.warn(f"scope xaricində URL rədd edildi: {url}")
                     continue
-                db.insert_url(host_row["id"], url, "ferox", False)
+                db.insert_url(host_row["id"], url, "ferox", False, scan_id=self.ctx.scan_id)
                 res.urls += 1
                 n += 1
                 length = r.get("content_length") or 0
@@ -131,7 +137,8 @@ class FeroxEngine:
                         f"Recursive tapıntı: {url}",
                         f"Feroxbuster {MAX_DEPTH} səviyyə dərinlikdə tapdı "
                         f"(status: {status}, ölçü: {length})",
-                        evidence=url, confidence=0.4, source="ferox")
+                        evidence=url, confidence=0.4, source="ferox",
+                        scan_id=self.ctx.scan_id)
                     res.findings += 1
         if n:
             print(f"[+] ferox {host}: {n} nəticə")

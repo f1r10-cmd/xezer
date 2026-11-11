@@ -36,11 +36,12 @@ class TestNormalizeStatus:
     def test_mapping(self, raw, expected):
         assert db.normalize_status(raw) == expected
 
-    def test_schema_version_is_3(self, tmp_db):
-        assert db.SCHEMA_VERSION == 3
+    def test_schema_version_is_5(self, tmp_db):
+        # v4/v5: `hosts.scan_id` + UNIQUE(scan_id, subdomain) → skan izolyasiyası.
+        assert db.SCHEMA_VERSION == 5
         row = tmp_db.get_db().execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert row["value"] == "3"
+        assert row["value"] == "5"
 
 
 # ---------------------------------------------------------------- lifecycle

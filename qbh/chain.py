@@ -41,6 +41,14 @@ TRIGGERS: dict[str, list[str]] = {
     "cve": ["confirm_template", "poc"],
     "blocked": ["bypass_matrix"],
     "nuclei": ["capture_evidence", "boost_confidence"],
+    # --- Faza 1.5: yeni offensive zəncir tetikleyiciləri ---
+    "sqli_signal": ["sqli_probe"],
+    "xss_signal": ["xss_probe"],
+    "ssti_signal": ["ssti_probe"],
+    "ssrf_signal": ["ssrf_probe"],
+    "jwt": ["jwt_probe"],
+    "git_exposed": ["source_harvest"],
+    "vuln_js_lib": ["library_cve_check"],
 }
 
 #: Hərəkətlər → icra anatomiyası: "local" (bu modul icra edir) /
@@ -55,7 +63,26 @@ ACTION_EXEC = {
     "confirm_template": "local", "poc": "local",
     "bypass_matrix": "local", "capture_evidence": "delegated",
     "boost_confidence": "local",
+    # Faza 1.1 mühərrikləri Conductor tərəfindən mərhələ kimi icra olunur.
+    "sqli_probe": "delegated", "xss_probe": "delegated",
+    "ssti_probe": "delegated", "ssrf_probe": "delegated",
+    "jwt_probe": "delegated", "source_harvest": "delegated",
+    "library_cve_check": "delegated",
 }
+
+#: Fingerprint/səhifə mətnində template engine işarələri → SSTI.
+TEMPLATE_ENGINE_RE = re.compile(
+    r"(?i)(jinja2?|twig|freemarker|velocity|handlebars|mustache|thymeleaf|"
+    r"smarty|mako|erb|razor|pug|nunjucks|django templates?)")
+
+#: URL-də SSRF-yə meyilli parametr adları.
+SSRF_PARAM_RE = re.compile(
+    r"(?i)[?&](url|uri|link|src|dest|redirect|next|target|callback|return|"
+    r"image|fetch|proxy|webhook|feed|host|domain|path)=")
+
+#: Ekspozisiya olunmuş Git metadata yolları.
+GIT_RE = re.compile(r"(?i)/\.git(/|$)|/\.svn(/|$)|/\.hg(/|$)")
+
 
 INTERESTING_RE = re.compile(
     r"(?i)(admin|api|internal|private|login|upload|debug|config|backup|"
@@ -77,7 +104,7 @@ class FindingStore:
 
     def candidate(self, host_id, module, severity, title, **kw) -> int:
         kw.setdefault("status", "candidate")
-        return db.insert_finding(host_id, module, severity, title, **kw)
+        return db.insert_finding(host_id, module, severity, title, scan_id=self.scan_id, **kw)
 
     def confirm(self, finding_id: int, note: str = "", evidence: str = "",
                 confidence: float = 0.85) -> None:
@@ -187,6 +214,50 @@ class ChainPipeline:
         for ev in (getattr(policy, "block_events", []) if policy else []):
             self.emit("blocked", f"{ev.host} HTTP {ev.status}")
 
+    def _discover_offensive_triggers(self) -> None:
+        """Faza 1.5: offensive zəncir tetikleyicilərini DB-dən çıxarır.
+
+        Bu, MÜƏYYƏN siqnalları (template engine, SSRF parametri, JWT, .git
+        ekspozisiyası, köhnə JS kitabxanası) yeni mühərriklərlə əlaqələndirir.
+        Heç bir siqnal uydurulmur — yalnız bazada REAL olan sətirlər oxunur.
+        """
+        conn = db.get_db()
+        sid = db.effective_scan_id(self.store.scan_id)
+
+        for row in conn.execute(
+                "SELECT h.subdomain, h.tech_raw, h.title FROM hosts h "
+                "WHERE h.scan_id=? AND h.tech_raw IS NOT NULL LIMIT 200",
+                (sid,)).fetchall():
+            blob = f"{row['tech_raw'] or ''} {row['title'] or ''}"
+            if TEMPLATE_ENGINE_RE.search(blob):
+                self.emit("ssti_signal", row["subdomain"])
+
+        for row in conn.execute(
+                "SELECT u.url FROM urls u JOIN hosts h ON h.id=u.host_id "
+                "WHERE h.scan_id=? AND u.url LIKE '%?%=%' LIMIT 400",
+                (sid,)).fetchall():
+            url = row["url"]
+            if SSRF_PARAM_RE.search(url):
+                self.emit("ssrf_signal", url)
+            if GIT_RE.search(url):
+                self.emit("git_exposed", url)
+            if "=" in url:
+                # Parametrli endpoint → SQLi/XSS namizədi (marker təsdiqi
+                # sonra müvafiq mühərrikdə baş verir).
+                self.emit("sqli_signal", url)
+                self.emit("xss_signal", url)
+
+        for row in conn.execute(
+                "SELECT js_url, kind FROM secrets WHERE kind LIKE '%JWT%' "
+                "LIMIT 50").fetchall():
+            self.emit("jwt", row["js_url"] or "")
+
+        for row in conn.execute(
+                "SELECT c.cve_id, h.subdomain FROM cve_matches c "
+                "JOIN hosts h ON h.id=c.host_id WHERE h.scan_id=? LIMIT 100",
+                (sid,)).fetchall():
+            self.emit("vuln_js_lib", f"{row['subdomain']}:{row['cve_id']}")
+
     # ------------------------------------------------------------------- run
     def _boost_nuclei_confidence(self) -> int:
         """Nuclei medium+ kandidatları üçün sübut əlavə edir, confidence artırır.
@@ -195,9 +266,11 @@ class ChainPipeline:
         bağlanır və status `candidate` olaraq qalır (təsdiq tələb olunur).
         """
         rows = db.get_db().execute(
-            "SELECT id, severity, confidence, template FROM findings "
-            "WHERE module='nuclei' AND status='candidate' "
-            "AND severity IN ('medium','high','critical') LIMIT 200").fetchall()
+            "SELECT f.id, f.severity, f.confidence, f.template FROM findings f "
+            "JOIN hosts h ON h.id=f.host_id "
+            "WHERE f.module='nuclei' AND f.status='candidate' AND h.scan_id=? "
+            "AND f.severity IN ('medium','high','critical') LIMIT 200",
+            (db.effective_scan_id(self.store.scan_id),)).fetchall()
         for r in rows:
             db.add_evidence(
                 r["id"], "note",
@@ -218,6 +291,7 @@ class ChainPipeline:
 
         print("[═══ CHAIN PIPELINE ═══] trigger-lər toplanır")
         self._discover_triggers()
+        self._discover_offensive_triggers()
 
         # --- local hərəkətlər (birbaşa icra) ---
         if self._budget_ok() and self.auth.allows("bypass"):

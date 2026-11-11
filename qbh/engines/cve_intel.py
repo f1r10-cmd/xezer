@@ -190,7 +190,7 @@ def _priority(kev: bool, epss: float) -> str:
 
 async def run(ctx) -> EngineResult:
     res = EngineResult(stage="cve_intel")
-    hosts = db.alive_hosts()[:MAX_HOSTS]
+    hosts = db.alive_hosts(ctx.scan_id)[:MAX_HOSTS]
     if not hosts:
         return res.skip("yaşayan host yoxdur — CVE intellekti atlandı")
 

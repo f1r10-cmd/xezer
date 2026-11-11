@@ -1,0 +1,23 @@
+name: wordpress
+checks:
+  - name: "wp-json istifadəçi siyahısı"
+    path: /wp-json/wp/v2/users
+    expect_status: [200]
+    expect_contains: "name"
+    finding: {severity: medium, title: "İstifadəçi adları açıqdır",
+              description: "wp-json API login adlarını ifşa edir — brute-force köməyi"}
+  - name: "xmlrpc açıqdır"
+    path: /xmlrpc.php
+    expect_status: [200, 405]
+    finding: {severity: medium, title: "XMLRPC aktivdir",
+              description: "Brute-force və pingback amplification üçün istifadə oluna bilər"}
+  - name: "wp-config backup"
+    path: /wp-config.php.bak
+    expect_status: [200]
+    finding: {severity: critical, title: "wp-config ehtiyat nüsxəsi açıqdır",
+              description: "DB parolları ifşa ola bilər"}
+  - name: "readme açıqdır"
+    path: /readme.html
+    expect_status: [200]
+    finding: {severity: low, title: "WordPress versiyası açıqdır",
+              description: "readme.html versiya ifşa edir"}

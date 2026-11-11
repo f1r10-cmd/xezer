@@ -1,0 +1,8 @@
+name: nodejs
+checks:
+  - name: "package.json"
+    path: /package.json
+    expect_status: [200]
+    expect_contains: "dependencies"
+    finding: {severity: medium, title: "package.json açıqdır",
+              description: "Node modulları və versiyaları ifşa olunur"}

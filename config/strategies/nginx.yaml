@@ -1,0 +1,12 @@
+name: nginx
+checks:
+  - name: "nginx status"
+    path: /nginx_status
+    expect_status: [200]
+    finding: {severity: low, title: "nginx status açıqdır",
+              description: "Server load və connection məlumatları ifşa olunur"}
+  - name: "server-status (proxy arxası)"
+    path: /server-status
+    expect_status: [200]
+    finding: {severity: medium, title: "server-status açıqdır",
+              description: "Backend məlumat ifşası"}

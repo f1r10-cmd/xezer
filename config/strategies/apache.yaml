@@ -1,0 +1,7 @@
+name: apache
+checks:
+  - name: "server-status"
+    path: /server-status
+    expect_status: [200]
+    finding: {severity: medium, title: "Apache server-status açıqdır",
+              description: "Request məlumatları ifşa olunur"}

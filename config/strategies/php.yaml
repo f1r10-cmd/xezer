@@ -1,0 +1,14 @@
+name: php
+checks:
+  - name: "phpinfo"
+    path: /phpinfo.php
+    expect_status: [200]
+    expect_contains: "phpinfo"
+    finding: {severity: medium, title: "phpinfo səhifəsi açıqdır",
+              description: "Tam system məlumatı ifşa olunur"}
+  - name: ".env faylı"
+    path: /.env
+    expect_status: [200]
+    expect_contains: "APP_"
+    finding: {severity: critical, title: ".env faylı açıqdır",
+              description: "DB və API key-lər ifşa ola bilər"}

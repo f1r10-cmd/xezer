@@ -1,0 +1,19 @@
+name: generic
+checks:
+  - name: ".git qovluğu"
+    path: /.git/HEAD
+    expect_status: [200]
+    expect_contains: "ref:"
+    finding: {severity: high, title: ".git qovluğu açıqdır",
+              description: "Source code tamamilə leak ola bilər (git-dumper ilə)"}
+  - name: ".env"
+    path: /.env
+    expect_status: [200]
+    expect_contains: "="
+    finding: {severity: critical, title: ".env açıqdır",
+              description: "Konfiqurasiya və secret-lər ifşa ola bilər"}
+  - name: "backup faylı"
+    path: /backup.sql
+    expect_status: [200]
+    finding: {severity: critical, title: "SQL backup açıqdır",
+              description: "Baza nüsxəsi yüklənə bilər"}

@@ -1,0 +1,49 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+findings.db
+reports/
+logs/
+
+# Temporary files
+/tmp/qbh_*
+*.log
+*.tmp
+*.bak
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local operational configuration - never publish
+/config/targets.yaml
+/config/proxies.txt
+/config/example_local.yaml
+/config/test_targets.yaml

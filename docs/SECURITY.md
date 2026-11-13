@@ -1,4 +1,4 @@
-# Təhlükəsizlik modeli — QBH v2.1 "Xəzər"
+# Təhlükəsizlik modeli — QBH v3.0 "Xəzər"
 
 QBH **avtorizə edilmiş** bug bounty və təhlükəsizlik qiymətləndirməsi üçün
 nəzərdə tutulmuşdur. Təhlükəsizlik modeli üç sütun üzərində qurulur:
@@ -57,9 +57,10 @@ Bütün mühərriklər eyni [`qbh/http_policy.py`](../qbh/http_policy.py)
 
 ## 3. Blok davranışı — adaptiv (configurable)
 
-v2.2-də blok idarəsi **"əyləc pedalı" deyil, adaptiv engine**-dir. Yeganə
+v3.0-da blok idarəsi **"əyləc pedalı" deyil, adaptiv engine**-dir. Yeganə
 toxunulmaz sərhəd avtorizasiya scope-udur; identiklik rotasiyası legitim
-OPSEC-dir və **audit olunur**.
+OPSEC-dir və **audit olunur**. WAF aşkarlanarsa stealth qatı rate/concurrency/
+template seçimini avtomatik uyğunlaşdırır (`qbh/stealth/policy.py`).
 
 `block_strategy` 403/429 cavabını idarə edir:
 
@@ -103,8 +104,12 @@ edilir:
   intrusive/exploit template-ləri də işlədilir; yalnız zərərli kateqoriyalar
   (`dos`, `brute-force`, `creds-stuffing`) həmişə istisna edilir. Xaricdən
   yüklənmiş ixtiyari template icra olunmur.
-- **Bypass** (401/403 matrisi) və **PoC** yalnız scope daxilində və proqram
-  qaydaları (`program_rules.forbidden`) icazə verdikdə işə düşür.
+- **Bypass** (401/403 matrisi), **PoC** və **secret replay** yalnız scope
+  daxilində və proqram qaydaları (`program_rules.forbidden`) icazə verdikdə
+  işə düşür.
+- **State-changing metodlar** (POST/PUT/PATCH/DELETE) `state_changing` hərəkəti
+  ilə **default qadağandır**; yalnız `--allow-state-changing` və proqram RoE-si
+  icazə verdikdə icra olunur.
 - **CF/CDN origin-IP bypass** funksionallığı silinmişdir (icazəsiz texnika).
 
 ## 5. Subprocess təhlükəsizliyi
@@ -118,8 +123,13 @@ edilir:
 - [`qbh/redact.py`](../qbh/redact.py) secret/token/parol nümunələrini
   (AWS, Google, GitHub, Slack, JWT, private key, `Authorization` başlığı və s.)
   maskalayır.
-- **JS analizdə tapılan secret-lər** yalnız maskalanmış formada saxlanır;
-  onlardan İSTİFADƏ EDİLMİR.
+- **JS analizdə tapılan secret-lər** iki yerdə saxlanılır: (a) insan üçün
+  oxunaqlı **maskalanmış** kopya, (b) replay üçün **şifrələnmiş** xam dəyər
+  ([`qbh/vault.py`](../qbh/vault.py), Fernet; açar yalnız lokal faylda, commit
+  olunmur).
+- Replay ([`qbh/engines/secret_replay.py`](../qbh/engines/secret_replay.py))
+  yalnız RoE (`secret_replay` icazəsi) və scope daxilində işləyir; log və
+  hesabatda secret hər zaman maskalanır (`redact`).
 - Hesabatda (Markdown və JSON) başlıq, təsvir, sübut və `curl_repro` redact
   olunur.
 - Etibarsız məzmun Markdown/HTML üçün escape olunur → **report injection /
@@ -138,7 +148,7 @@ edilir:
 ## 8. Məlum məhdudiyyətlər
 
 - Heuristik siqnallar (banner, başlıq) tək başına zəiflik sübutu DEYİL —
-  `potential` statusu ilə qeyd olunur.
+  `candidate` statusu ilə qeyd olunur.
 - Scope yalnız konfiqurasiya dəqiq və tam olduqda qoruyucudur.
 - Üçüncü tərəf CVE mənbələri (NVD, OSV, KEV, EPSS) xarici API-lərdir; onlar
   skan hədəfi DEYİL və onlara hədəf scope-u tətbiq olunmur.

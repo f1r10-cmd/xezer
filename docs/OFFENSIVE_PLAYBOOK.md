@@ -1,4 +1,4 @@
-# Offensive Playbook — QBH Xəzər v2.2
+# Offensive Playbook — QBH Xəzər v3.0
 
 **Məqsəd:** İcazəli hədəfdə *maksimum tapıntı* çıxarmaq üçün zəncirləmə
 pipeline-ının necə işlədiyini və necə konfiqurasiya olunduğunu göstərmək.
@@ -11,7 +11,10 @@ pipeline-ının necə işlədiyini və necə konfiqurasiya olunduğunu göstərm
 ## 1. Fəlsəfə: "topla, sonra süz" → "tap, sonra təsdiqlə"
 
 v2.1 kəşfləri toplayır, lakin onları **test etmirdi** — tapıntılar `potential`
-statusunda ölürdü. v2.2-də hər kəşf avtomatik növbəti addıma **zəncirlənir**:
+statusunda ölürdü. v2.2-də hər kəşf avtomatik növbəti addıma **zəncirlənirdi**;
+v3.0-da isə zəncirin yerli addımları (bypass, confirm, **secret replay**,
+parametr/OpenAPI fuzzinqi) real mühərriklərlə **icra olunur**, `--mode hunt` isə
+yüksək dəyərli URL-lər üzərində əlavə dərin pass qoşur:
 
 ```
 Recon → Discover → Enrich → Test → Confirm → PoC → Report
@@ -24,9 +27,10 @@ Recon → Discover → Enrich → Test → Confirm → PoC → Report
 | Trigger | Avtomatik davam | İcra |
 |---|---|---|
 | Subdomain kəşfi | canlı-yoxlama; canlıdırsa fingerprint + JS analizi | delegasiya |
-| JS faylı | endpoint + secret çıxarışı | delegasiya |
-| Yeni parametr | gizli parametr aşkarlanması → fuzz | delegasiya |
-| OpenAPI sənədi | server-ləri scope-a yoxla → Schemathesis aktiv fuzz | delegasiya |
+| JS faylı | endpoint + secret çıxarışı → eyni hostda yoxlama + **secret replay** | delegasiya + **lokal** (`secret_replay`) |
+| Yeni parametr | gizli parametr aşkarlanması → fuzz | **lokal** (`hidden_param_detect`, `param_fuzz`) |
+| OpenAPI sənədi | server-ləri scope-a yoxla → Schemathesis aktiv fuzz | delegasiya + **lokal** (`schemathesis_fuzz`) |
+| CNAME dangling (takeover) | domen iddiası yoxlanılır → `confirmed` | **lokal** (`qbh/engines/takeover.py`) |
 | Maraqlı endpoint (login/upload/admin) | hədəfli fuzz / SQLi-yönlü yoxlama | delegasiya + **bypass** (lokal) |
 | Fingerprint-dən CVE uyğunluğu | təsdiq template-i / skript PoC | **lokal** (`confirm_template`) |
 | 401/403 maraqlı yolda | bypass matrisi (`payloads.build_matrix`) | **lokal** (`bypass_matrix`) |
@@ -48,7 +52,17 @@ sonra:
 2. **`confirm_template` / `poc`** — CVE və exposure kandidatları canlı cavabla
    yoxlanılır; uyğun gələrsə `confirmed`, 404 olarsa `rejected`
    (`engines/confirm.py`).
-3. **`boost_confidence`** — nuclei medium+ kandidatlarına mövcud siqnal sübut
+3. **`secret_replay`** — JS-dən çıxarılmış secret-lər şifrəli vault-dan
+   (`qbh/vault.py`) açılır və eyni hostda yönləndirilmiş endpoint-lərə
+   **replay olunur** (`engines/secret_replay.py`). RoE (`secret_replay`
+   qadağası) və scope qapısı tətbiq olunur; uğurlu replay `confirmed` sayılır,
+   secret-lər hər zaman maskalanır.
+4. **`hidden_param_detect` / `param_fuzz`** — parametrli URL-lər üçün gizli
+   parametr aşkarlanması + (aktiv fuzz icazəlidirsə) parametr fuzzinqi
+   (`engines/param_enum.py`).
+5. **`schemathesis_fuzz`** — OpenAPI sxemi üzərində yalnız GET metodları ilə
+   property-test (`engines/api_fuzz.py`).
+6. **`boost_confidence`** — nuclei medium+ kandidatlarına mövcud siqnal sübut
    kimi bağlanır və confidence 0.75-ə qaldırılır. **Status `candidate` qalır** —
    təsdiq uydurulmur.
 
@@ -89,7 +103,10 @@ qadağan edərsə, profil `aggressive` olsa belə deaktiv olunur (`config.py`).
 İstifadəçi/proqram aşağıdakı hərəkətləri qadağan edə bilər:
 
 `active_fuzz`, `intrusive_templates`, `bypass`, `cve_poc`, `secret_replay`,
-`param_fuzz`, `race`.
+`param_fuzz`, `race`, `state_changing`.
+
+`state_changing` (POST/PUT/PATCH/DELETE) **default olaraq qadağandır** və yalnız
+`--allow-state-changing` bayrağı ilə açılır; proqram RoE-si həmişə qalib gəlir.
 
 Qadağan edilmiş hərəkət zəncir addımında və engine daxilində hörmətlə
 atlanır (uydurma nəticə yoxdur).
@@ -190,6 +207,7 @@ program_rules:
 
 ```bash
 python main.py --mode full --config config/targets.yaml
+python main.py --mode hunt --config config/targets.yaml   # tam zəncir + dərin pass
 python main.py --mode full --config config/targets.yaml --targets acme.com
 python main.py --mode report    # mövcud baza üzərindən hesabat
 ```
@@ -199,18 +217,33 @@ ilə fail-closed yoxlanılır.
 
 ---
 
-## 10. Açıq məhdudiyyətlər (dürüst)
+## 10. Vəziyyət və açıq məhdudiyyətlər (dürüst)
 
-Bu playbook "hər şey hazırdır" demir. Aşağıdakılar **hələ tam deyil** və
-`docs/SECURITY_VERIFICATION.md`-də PARTIAL kimi işarələnib:
+Bu playbook "hər şey hazırdır" demir, lakin v3.0 Faza 3 ilə əvvəlki boşluqları
+bağladı. **Real olan**:
 
-- JS-dən çıxarılan **secret-lərin birbaşa replay-i** (`test_secret_endpoints`)
-  həyata keçirilməyib — bazada yalnız **maskalanmış** secret saxlanılır, ona
-  görə xam dəyər mövcud deyil.
-- OpenAPI **server-lərinin canlı scope yoxlaması** ayrıca lokal addım kimi
-  yoxdur; Schemathesis mərhələsi Conductor boru xəttində icra olunur.
-- `secret_replay` və bəzi zəncir addımları RoE qapısından keçir, lakin
-  hazırda yalnız `bypass`, `cve_poc` və `active_fuzz` üçün real engine
-  tətbiqi var.
+- JS-dən çıxarılan **secret-lərin replay-i** (`test_secret_endpoints` /
+  `secret_replay`) **həyata keçirilmişdir** — secret-lər `qbh/vault.py`-də
+  Fernet ilə şifrələnmiş saxlanılır, icazə verildikdə açılıb replay olunur
+  (`engines/secret_replay.py`).
+- **CNAME dangling takeover** aşkarlanması real mühərriklə işləyir
+  (`engines/takeover.py`, Faza 3.3).
+- Zəncirin parametr/OpenAPI addımları **real icra** olunur (`param_enum.py`,
+  `api_fuzz.py`, Faza 3.4).
+- `--mode hunt` (Faza 3.5) avtomatik tam zənciri + yüksək dəyərli URL-lər
+  üzərində dərin pass-ı birləşdirir.
+- Adaptiv stealth (Faza 3.6): WAF aşkarlamasına görə rate/concurrency/template
+  uyğunlaşdırılır və humanization tətbiq olunur (`qbh/stealth/`).
+
+**Hələ məhdud olan** (gizlədilmir — `docs/SECURITY_VERIFICATION.md`-ə baxın):
+
+- Subprocess alətlərinin (nuclei, ffuf, ...) öz daxili DNS/redirect davranışı
+  üzərində tam egress nəzarəti yalnız **OS səviyyəli sandbox** ilə mümkündür;
+  layihə scope qapısı və `EgressController` tətbiq edir, lakin proses daxili
+  hər paketi qarantiyalaya bilmir.
+- Heuristik siqnallar (banner, başlıq) tək başına sübut DEYİL — `candidate`
+  statusunda qalır və manual təsdiq tələb edir.
+- Real hədəf üzərində canlı validasiya hələ aparılmayıb (yalnız loopback
+  fixture E2E testində işlədilib).
 
 Bunlar gizlədilmir — `docs/SECURITY_VERIFICATION.md` cədvəlinə baxın.

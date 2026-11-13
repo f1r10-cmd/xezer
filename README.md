@@ -150,6 +150,9 @@ hər addım scope yoxlanılır — **redirect escape mümkün deyil**.
 # Tam skan (recon + vuln + zəncirləmə) — konfiqdəki bütün icazəli hədəflər
 python main.py --config config/targets.yaml --mode full
 
+# Hunter rejimi — tam zəncir + yüksək dəyərli URL-lər üzərində dərin pass
+python main.py --config config/targets.yaml --mode hunt
+
 # Yalnız recon / yalnız vuln / yalnız hesabat
 python main.py --mode recon
 python main.py --mode vuln
@@ -172,7 +175,7 @@ python main.py --mode full --severity high
 | Bayraq | Təsvir |
 |---|---|
 | `--config PATH` | YAML konfiq (default: `config/targets.yaml`) |
-| `--mode {full,recon,vuln,report,install}` | İcra rejimi |
+| `--mode {full,recon,vuln,hunt,report,install}` | İcra rejimi (`hunt`: tam zəncir + dərin pass) |
 | `--aggressiveness {passive,normal,aggressive}` | İcra profili (konfiqdəki dəyəri override edir) |
 | `--targets d1,d2` | Yalnız bu hədəflər (scope yoxlaması ilə) |
 | `--rate N` | Saniyədə sorğu limiti (effektiv profildən yuxarı ola bilməz) |
@@ -180,6 +183,7 @@ python main.py --mode full --severity high
 | `--proxy {off,single}` | Proxy rejimi (OPSEC rotasiyası, scope daxilində) |
 | `--active-fuzz` | Aktiv fuzzinqi MƏCBURİ yandır (profil default-u ON) |
 | `--no-active-fuzz` | Aktiv fuzzinqi söndür (passive yoxlama rejimi) |
+| `--allow-state-changing` | POST/PUT/PATCH/DELETE-ə icazə ver (default OFF; RoE qalib gəlir) |
 | `--auto-install` | Çatışmayan tool-ları quraşdır (yoxlama ilə) |
 | `--dry-run` | Heç nə icra etmə, yalnız planı göstər |
 | `--race-fixture URL` | Race testi üçün YALNIZ lokal loopback fixture |
@@ -227,6 +231,11 @@ fixture istifadə edir və heç bir xarici şəbəkəyə müraciət etmir:
 | M6+ CVE İntel | NVD + OSV + GitHub Advisory + CISA KEV + EPSS (mənbə atribusiyası) |
 | Validation / Confirm | Sübut yoxlaması, CVE/exposure təsdiqi, confidence |
 | Bypass | 401/403 matrisi (path/header/verb) — aggressiv profildə |
+| Secret Vault | JS secret-lərini şifrəli (Fernet) saxlayır; yalnız replay üçün açır |
+| Secret Replay | Vault secret-lərini yalnız RoE + scope daxilində endpoint-lərə replay edir |
+| Takeover | CNAME dangling aşkarlanması |
+| Stealth | WAF aşkarlaması → adaptiv rate/concurrency/template + humanization (`qbh/stealth/`) |
+| Hunter | `--mode hunt` orkestratoru (tam zəncir + dərin pass) |
 | Chain | Kəşfləri avtomatik növbəti addıma zəncirləyir (`qbh/chain.py`) |
 | Guardian | Scope + rate + adaptiv blok strategiyası + rotasiya audit |
 
@@ -327,6 +336,7 @@ kimi qeyd olunur və hesabatda göstərilir.
 
 - [docs/OFFENSIVE_PLAYBOOK.md](docs/OFFENSIVE_PLAYBOOK.md) — offensive zəncirləmə, profillər, rotasiya
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — arxitektura və modul təsviri
+- [docs/STEALTH.md](docs/STEALTH.md) — deteksiya-azaltma (stealth/OPSEC) qatı
 - [docs/SECURITY.md](docs/SECURITY.md) — təhlükəsizlik modeli və siyasətlər
 - [docs/SECURITY_VERIFICATION.md](docs/SECURITY_VERIFICATION.md) — dürüst PASS/PARTIAL yoxlaması
 - [docs/REMEDIATION_REPORT.md](docs/REMEDIATION_REPORT.md) — v2.1→v2.2 remediasiya hesabatı
@@ -339,10 +349,11 @@ kimi qeyd olunur və hesabatda göstərilir.
 ## Məlum məhdudiyyətlər
 
 - Yalnız konfiqurasiyada AÇIQ icazə verilmiş scope daxilində işləyir.
-- JS-dən çıxarılan secret-lərin birbaşa replay-i implementasiya olunmayıb
-  (bazada yalnız maskalanmış secret saxlanılır) — bax
-  [docs/SECURITY_VERIFICATION.md](docs/SECURITY_VERIFICATION.md).
-- OpenAPI server-lərinin canlı scope yoxlaması ayrıca lokal addım kimi yoxdur.
-- Race testi yalnız `--race-fixture` ilə **lokal loopback** fixture üzərində.
+- Subprocess alətlərinin öz daxili DNS/redirect davranışı üzərində tam nəzarət
+  yalnız **OS səviyyəli sandbox** ilə mümkündür (layihə scope + egress qapısı
+  tətbiq edir; bax [docs/STEALTH.md](docs/STEALTH.md)).
 - Heuristik siqnallar manual təsdiq tələb edir.
 - Tool çatışmazlığı, timeout və şəbəkə xətaları əhatəni azalda bilər.
+- Race testi yalnız `--race-fixture` ilə **lokal loopback** fixture üzərində.
+- Real hədəf üzərində canlı validasiya hələ aparılmayıb — Faza 4 yalnız loopback
+  "vulnerable app" fixture üzərində uçdan-uca yoxlanılıb.

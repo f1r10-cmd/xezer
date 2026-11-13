@@ -44,6 +44,7 @@ from .engines.sourcecode import SourceCodeEngine
 from .engines.sqli import SQLiEngine
 from .engines.ssrf import SSRFEngine
 from .engines.ssti import SSTIEngine
+from .engines.takeover import TakeoverEngine
 from .engines.validation import ValidationEngine
 from .engines.vuln import VulnEngine
 from .engines.wafdetect import WafDetectEngine
@@ -249,6 +250,10 @@ class Conductor:
         # Faza 2.2: WAF identikliyi — sonrakı stealth qərarlarını idarə edir.
         await self._run_stage("wafdetect", "",
                               lambda: WafDetectEngine(self.ctx).run())
+
+        # Faza 3.3: CNAME takeover (dangling CNAME + provayder imzası).
+        await self._run_stage("takeover", "",
+                              lambda: TakeoverEngine(self.ctx).run())
 
         await asyncio.gather(
             self._run_stage("vuln", "", lambda: VulnEngine(self.ctx).run()),

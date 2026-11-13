@@ -145,6 +145,11 @@ async def local_server():
             return web.Response(text="granted-access-body")
         return web.Response(status=401, text="unauthorized")
 
+    # Faza 3.3: CNAME takeover fixture — provayderin "sahibsiz" imzası.
+    async def gh_pages_gone(request):
+        return web.Response(status=404,
+                            text="There isn't a GitHub Pages site here")
+
     app = web.Application()
     app.add_routes([
         web.get("/", index),
@@ -159,6 +164,7 @@ async def local_server():
         web.get("/count", count),
         web.get("/conc", conc),
         web.get("/secret", secret_ok),
+        web.get("/gh-pages-gone", gh_pages_gone),
     ])
     runner = web.AppRunner(app)
     await runner.setup()

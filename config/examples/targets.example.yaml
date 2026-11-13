@@ -1,0 +1,71 @@
+# QBH "Xəzər" — real proqram scope-u üçün ŞABLON.
+#
+# TƏHLÜKƏSİZLİK: bu şablon default olaraq YALNIZ loopback (`127.0.0.1`) scope-u
+# saxlayır. Real istifadə zamanı `scope` bölməsini SƏNİN avtorizasiya etdiyin
+# bug bounty / pentest proqramının domenləri ilə əvəz et. Scope xaricində heç bir
+# trafik göndərilmir (fail-closed) — yanlış/boş scope → icra dayandırılır.
+#
+# Kopyala və redaktə et:
+#   cp config/examples/targets.example.yaml config/targets.yaml
+#   python main.py --config config/targets.yaml --mode full
+program: "REPLACE_WITH_PROGRAM_NAME"
+nvd_api_key: ""                 # NVD API açarı (rate limitini artırır)
+aggressiveness: normal          # passive | normal | aggressive
+
+scope:
+  # NÜMUNƏ (loopback-only, təhlükəsiz default). Real domen buraxmaq üçün:
+  #
+  #   - domain: example.com
+  #     in_scope:
+  #       - example.com          # kök domen
+  #       - "*.example.com"      # bütün alt domenlər
+  #     out_of_scope:
+  #       - "admin.example.com"  # açıq istisna
+  #
+  - domain: 127.0.0.1
+    in_scope:
+      - 127.0.0.1
+    out_of_scope: []
+
+limits:
+  requests_per_second: 5
+  max_subdomains_per_target: 500
+  max_concurrency: 10
+  connect_timeout: 10
+  total_timeout: 30
+  cooldown: 60
+
+proxy_file: ""                  # rotasiya üçün proxy siyahısı (OPSEC)
+
+# Proqramın qadağaları (RoE) — verilən hərəkət atlanır və audit olunur.
+# Məsələn, PoC icrası qadağandırsa: ["cve_poc"]
+program_rules:
+  forbidden: []
+  allow_wildcard_expansion: true
+  max_requests_per_second: 0    # 0 → profil/limits default
+
+rotation:
+  enabled: true
+  ua: true
+  headers: true
+  proxy: false
+  on_block: true
+
+block_strategy:
+  http_429: respect
+  http_403: backoff
+
+chain:
+  enabled: true
+  max_depth: 3
+  max_tasks: 200
+
+oob:
+  enabled: true
+  domain: ""                    # internetdən əlçatan geri-zəng domeni
+  listen_host: 127.0.0.1
+  backend: local
+  wait: 20
+
+antiblock:
+  interface: "eth0"

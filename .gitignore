@@ -45,5 +45,8 @@ Thumbs.db
 # Local operational configuration - never publish
 /config/targets.yaml
 /config/proxies.txt
-/config/example_local.yaml
 /config/test_targets.yaml
+
+# Committed, loopback-only safe examples (must stay in git)
+!/config/examples/
+!/config/examples/**

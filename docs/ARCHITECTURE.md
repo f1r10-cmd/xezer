@@ -30,10 +30,11 @@ qbh-xazar/
 ├── requirements.txt
 ├── pytest.ini
 ├── config/
-│   ├── example_local.yaml      # yalnız 127.0.0.1 (təhlükəsiz nümunə)
-│   ├── targets.yaml            # real scope şablonu
-│   ├── test_targets.yaml
-│   ├── proxies.txt
+│   ├── examples/               # git-də saxlanılan təhlükəsiz nümunələr
+│   │   ├── example_local.yaml  # yalnız 127.0.0.1 (loopback nümunə)
+│   │   └── targets.example.yaml# real scope şablonu
+│   ├── targets.yaml            # yerli real scope (git-ignore)
+│   ├── proxies.txt             # (git-ignore)
 │   └── strategies/*.yaml       # fingerprint strategiyaları
 ├── qbh/
 │   ├── config.py               # YAML yükləmə + profillər/RoE + ciddi validasiya

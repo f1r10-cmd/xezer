@@ -49,9 +49,12 @@ Konfiqurasiya YAML faylıdır. Nümunələr:
 
 | Fayl | Təyinat |
 |---|---|
-| [config/example_local.yaml](config/example_local.yaml) | Yalnız `127.0.0.1` üçün təhlükəsiz nümunə |
-| [config/targets.yaml](config/targets.yaml) | Real proqram scope-u (şablon) |
-| [config/test_targets.yaml](config/test_targets.yaml) | Test nümunəsi |
+| [config/examples/example_local.yaml](config/examples/example_local.yaml) | Yalnız `127.0.0.1` üçün təhlükəsiz nümunə |
+| [config/examples/targets.example.yaml](config/examples/targets.example.yaml) | Real proqram scope-u (şablon) |
+
+> Real konfiqi şablondan kopyala: `cp config/examples/targets.example.yaml
+> config/targets.yaml` və `scope`-u öz avtorizasiya etdiyin proqramla əvəz et.
+> `config/targets.yaml` git-ignore olunur (yalnız yerli).
 
 ```yaml
 program: "Qarabug"
@@ -194,7 +197,7 @@ saxlanılır və hesabat yenə yazılır.
 Xarici hədəfə ehtiyac olmadan bütün pipeline-ı yoxlamaq üçün:
 
 ```bash
-python main.py --config config/example_local.yaml --mode full
+python main.py --config config/examples/example_local.yaml --mode full
 ```
 
 Bu konfiq yalnız `127.0.0.1`-ə icazə verir. Testlər də yalnız lokal HTTP

@@ -26,7 +26,12 @@ class TestValidConfig:
             cfg.authorize_target("evil.com")
 
     def test_example_local_config_is_valid(self):
-        cfg = Config.load("config/example_local.yaml")
+        cfg = Config.load("config/examples/example_local.yaml")
+        assert cfg.in_scope("127.0.0.1")
+        assert not cfg.in_scope("8.8.8.8")
+
+    def test_example_targets_config_is_valid(self):
+        cfg = Config.load("config/examples/targets.example.yaml")
         assert cfg.in_scope("127.0.0.1")
         assert not cfg.in_scope("8.8.8.8")
 

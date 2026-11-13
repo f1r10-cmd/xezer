@@ -46,8 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default="config/targets.yaml",
                    help="YAML konfiq faylı (default: config/targets.yaml)")
     p.add_argument("--mode", default="full",
-                   choices=["full", "recon", "vuln", "report", "install"],
-                   help="icra rejimi")
+                   choices=["full", "recon", "vuln", "hunt", "report",
+                            "install"],
+                   help="icra rejimi (hunt: avtomatik tam zəncir + dərin pass)")
     p.add_argument("--aggressiveness", default=None,
                    choices=["passive", "normal", "aggressive"],
                    help="icra profili (konfiqdəki dəyəri override edir)")
@@ -109,6 +110,10 @@ async def run(args: argparse.Namespace) -> int:
         await conductor.run_recon_mode()
     elif args.mode == "vuln":
         await conductor.run_vuln_mode()
+    elif args.mode == "hunt":
+        from qbh.hunter import Hunter
+
+        await Hunter(conductor).hunt()
 
     return EXIT_FAILURE if conductor.failed_stages else EXIT_OK
 

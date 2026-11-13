@@ -177,3 +177,30 @@ class TestFullPipelineSmoke:
         # Hesabat yaradılsa da, scope xarici hədəf heç vaxt daxil edilmir.
         for path in _reports(tmp_path):
             assert "evil.example.com" not in path.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------- hunt mode
+
+
+class TestHuntModeSmoke:
+    """`main.py --mode hunt` — avtomatik tam zəncir + dərin pass (Faza 3.5)."""
+
+    def test_hunt_pipeline_records_scan_and_writes_report(
+            self, tmp_db, write_config, no_external_network, monkeypatch,
+            tmp_path):
+        monkeypatch.chdir(tmp_path)
+        cfg = write_config([
+            {"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
+             "out_of_scope": []}])
+
+        rc = main_mod.main(["--config", cfg, "--mode", "hunt"])
+        assert rc in (main_mod.EXIT_OK, main_mod.EXIT_FAILURE)
+
+        scan_id, status = _latest_scan()
+        assert scan_id >= 1
+        assert status in ("completed", "partial")
+
+        files = _reports(tmp_path)
+        assert len(files) == 1
+        assert files[0].stat().st_size > 0
+        assert current_process_guard() is None

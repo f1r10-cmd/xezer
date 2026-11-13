@@ -158,3 +158,178 @@ class TestMigrationV4:
         _add(1, "a.example.com")
         db.init_db()   # təkrar
         assert {r["subdomain"] for r in db.alive_hosts(1)} == {"a.example.com"}
+
+
+# ------------------------------------------------------------- v4 → v5 miqrasiya
+class TestMigrationV5:
+    """v4 → v5: `evidence`/`stage_status`/`validated` cədvəlləri + findings
+    üzrə əlavə sütunlar (`scan_id`, `confidence`, `status`, `source`,
+    `fingerprint`, `first_seen`, `last_seen`), `urls.scan_id`,
+    `cve_matches.match_type/source`. Mövcud sətirlər və id-lər QORUNMALI,
+    köhnə statuslar yeni həyat dövrünə köçməlidir."""
+
+    def _make_v4_db(self, path):
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            "CREATE TABLE hosts ("
+            " id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL DEFAULT 0,"
+            " subdomain TEXT NOT NULL, ip TEXT, real_ip TEXT, cdn TEXT,"
+            " status_code INTEGER, title TEXT, tech_raw TEXT,"
+            " strategy TEXT DEFAULT 'generic', source TEXT,"
+            " halted INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT,"
+            " UNIQUE(scan_id, subdomain));"
+            "CREATE TABLE urls ("
+            " id INTEGER PRIMARY KEY, host_id INTEGER REFERENCES hosts(id)"
+            " ON DELETE CASCADE, url TEXT, source TEXT, is_js INTEGER,"
+            " found_at TEXT, UNIQUE(host_id, url));"
+            "CREATE TABLE findings ("
+            " id INTEGER PRIMARY KEY, host_id INTEGER, module TEXT,"
+            " severity TEXT, title TEXT, description TEXT, evidence TEXT,"
+            " curl_repro TEXT, template TEXT, status TEXT);"
+            "CREATE TABLE cve_matches ("
+            " id INTEGER PRIMARY KEY, host_id INTEGER, cve_id TEXT,"
+            " product TEXT, version_detected TEXT, in_kev INTEGER DEFAULT 0,"
+            " epss REAL DEFAULT 0, priority TEXT DEFAULT 'low',"
+            " created_at TEXT, UNIQUE(host_id, cve_id));"
+            "INSERT INTO hosts(id,scan_id,subdomain,status_code)"
+            " VALUES(7,1,'v4host.example.com',200);"
+            "INSERT INTO urls(id,host_id,url,source)"
+            " VALUES(8,7,'https://v4host.example.com/x','ferox');"
+            "INSERT INTO findings(id,host_id,module,severity,title,status)"
+            " VALUES(11,7,'content','high','V4 finding','verified');"
+            "INSERT INTO cve_matches(id,host_id,cve_id,product)"
+            " VALUES(12,7,'CVE-2024-0001','nginx');")
+        conn.commit()
+        conn.close()
+
+    def test_v4_upgrade_adds_tables_and_columns(self, tmp_path, monkeypatch):
+        legacy = tmp_path / "v4.db"
+        self._make_v4_db(legacy)
+        monkeypatch.setattr(db, "DB_PATH", str(legacy))
+        db.close_db()
+        db.init_db()
+        try:
+            conn = db.get_db()
+            tables = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert {"evidence", "stage_status", "validated"} <= tables
+
+            fcols = {r["name"] for r in conn.execute(
+                "PRAGMA table_info(findings)")}
+            assert {"scan_id", "confidence", "status", "source", "fingerprint",
+                    "first_seen", "last_seen"} <= fcols
+            assert "scan_id" in {r["name"] for r in
+                                 conn.execute("PRAGMA table_info(urls)")}
+            assert {"match_type", "source"} <= {r["name"] for r in
+                                               conn.execute(
+                                                   "PRAGMA table_info(cve_matches)")}
+
+            assert conn.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()["value"] == "5"
+
+            # Data və id-lər qorunur; köhnə status yeni həyat dövrünə köçür.
+            f = conn.execute("SELECT id,status FROM findings WHERE id=11"
+                             ).fetchone()
+            assert f["id"] == 11
+            assert f["status"] == "confirmed"
+            assert conn.execute(
+                "SELECT COUNT(*) c FROM urls WHERE host_id=7").fetchone()["c"] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) c FROM cve_matches WHERE host_id=7"
+            ).fetchone()["c"] == 1
+            # v4 host real skan altında qalır (scan_id=1).
+            assert [r["subdomain"] for r in db.alive_hosts(1)] == \
+                ["v4host.example.com"]
+            assert db.alive_hosts(2) == []
+        finally:
+            db.close_db()
+
+    def test_v5_migration_idempotent(self, tmp_path, monkeypatch):
+        legacy = tmp_path / "v4b.db"
+        self._make_v4_db(legacy)
+        monkeypatch.setattr(db, "DB_PATH", str(legacy))
+        db.close_db()
+        for _ in range(3):
+            db.init_db()   # təkrar-təkrar → data itmir, sütun təkrarlanmır
+        try:
+            conn = db.get_db()
+            assert conn.execute(
+                "SELECT COUNT(*) c FROM findings").fetchone()["c"] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) c FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()["c"] == 1
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(findings)")]
+            assert cols.count("scan_id") == 1
+        finally:
+            db.close_db()
+
+
+# ------------------------------------------------------------- paralel skanlar
+class TestParallelScans:
+    def test_concurrent_scans_stay_isolated(self, tmp_db):
+        """Paralel işləyən skanlar bir-birinin hostlarını/tapıntılarını
+        görməməlidir (thread — real WAL yazıları)."""
+        import threading
+
+        n = 15
+        scans = (1, 2, 3)
+        errors: list[BaseException] = []
+
+        def worker(scan_id):
+            try:
+                for i in range(n):
+                    sub = f"s{scan_id}-{i}.example.com"
+                    hid = db.upsert_host(sub, scan_id, status_code=200)
+                    db.insert_finding(hid, "content", "high",
+                                      f"F{scan_id}-{i}", scan_id=scan_id)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                db.close_db()
+
+        threads = [threading.Thread(target=worker, args=(s,)) for s in scans]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        for s in scans:
+            hosts = db.alive_hosts(s)
+            assert len(hosts) == n
+            assert all(h["subdomain"].startswith(f"s{s}-") for h in hosts)
+
+    def test_concurrent_same_subdomain_separate_rows(self, tmp_db):
+        """Eyni host adı paralel iki skanda AYRI sətir kimi saxlanılır."""
+        import threading
+
+        errors: list[BaseException] = []
+
+        def worker(scan_id):
+            try:
+                db.upsert_host("shared.example.com", scan_id, status_code=scan_id)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                db.close_db()
+
+        threads = [threading.Thread(target=worker, args=(s,)) for s in (5, 6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert db.alive_hosts(5)[0]["status_code"] == 5
+        assert db.alive_hosts(6)[0]["status_code"] == 6
+
+    def test_sequential_multi_scan_accumulates_without_crossing(self, tmp_db):
+        """Çoxsaylı ardıcıl skan: hər skanın nəticəsi öz qrupunda qalır."""
+        for scan_id in range(1, 6):
+            _add(scan_id, f"scan{scan_id}.example.com")
+        for scan_id in range(1, 6):
+            got = {r["subdomain"] for r in db.alive_hosts(scan_id)}
+            assert got == {f"scan{scan_id}.example.com"}
+        assert db.all_hosts(None) == []   # heç bir sətir legacy qrupuna düşməyib
+        assert sum(len(db.all_hosts(s)) for s in range(1, 6)) == 5

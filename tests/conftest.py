@@ -177,6 +177,86 @@ async def local_server():
         await runner.cleanup()
 
 
+@pytest_asyncio.fixture
+async def vuln_app():
+    """Tək "zəiflikli tətbiq" loopback fixture-i (Faza 4.3).
+
+    `local_server`-dən fərqli olaraq REAL bug-bounty səthini təqlid edir:
+
+      * `/` — əsas səhifə; `Authorization: Bearer <JWT>` ilə FƏRQLİ cavab
+        (secret replay təsdiqi üçün);
+      * `/admin` — qorunan yol: default `401`, lakin `X-Forwarded-For: 127.0.0.1`
+        başlığı ilə `200` (bypass texnikası aça bilir);
+      * `/app.js` — içində YALANÇI JWT olan JS faylı (secret aşkarlanması);
+      * `/openapi.json` — açıq OpenAPI sxemi (api_enum üçün);
+      * `/search?q=` — parametri cavabda ƏKS ETDİRƏN endpoint.
+
+    Heç bir xarici şəbəkə trafiki yoxdur — yalnız `127.0.0.1`.
+    """
+    import json
+
+    from aiohttp import web
+
+    #: jwt.io nümunə tokeni — real credential DEYİL, yalnız fixture üçün.
+    jwt = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+           "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ."
+           "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+    js_body = (
+        "function login(){var t='" + jwt + "';"
+        "fetch('/api/v1/users',{headers:{Authorization:'Bearer '+t}});}\n")
+    openapi = {
+        "openapi": "3.0.0",
+        "info": {"title": "QBH demo API", "version": "1.0.0"},
+        "paths": {"/api/v1/users": {"get": {"summary": "list users"}}},
+    }
+
+    async def index(request):
+        if request.headers.get("Authorization", "") == f"Bearer {jwt}":
+            return web.Response(text="granted-access-body")
+        return web.Response(text="hello qbh")
+
+    async def admin(request):
+        if request.headers.get("X-Forwarded-For", "").strip() == "127.0.0.1":
+            return web.Response(text="admin panel — sensitive data exposed")
+        return web.Response(status=401, text="unauthorized")
+
+    async def app_js(request):
+        return web.Response(text=js_body,
+                            content_type="application/javascript")
+
+    async def openapi_doc(request):
+        return web.Response(text=json.dumps(openapi),
+                            content_type="application/json")
+
+    async def users(request):
+        return web.Response(text='{"users":[]}',
+                            content_type="application/json")
+
+    async def search(request):
+        q = request.query.get("q", "")
+        return web.Response(text=f"<html><body>results for {q}</body></html>",
+                            content_type="text/html")
+
+    app = web.Application()
+    app.add_routes([
+        web.get("/", index),
+        web.get("/admin", admin),
+        web.get("/app.js", app_js),
+        web.get("/openapi.json", openapi_doc),
+        web.get("/api/v1/users", users),
+        web.get("/search", search),
+    ])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    try:
+        yield {"base": f"http://127.0.0.1:{port}", "jwt": jwt}
+    finally:
+        await runner.cleanup()
+
+
 @pytest.fixture
 def make_ctx(loopback_config):
     """Mühərrik testləri üçün real `Context` yaradır (şəbəkəsiz)."""

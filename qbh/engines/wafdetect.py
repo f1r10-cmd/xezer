@@ -66,6 +66,14 @@ class WafDetectEngine:
                 except ScopeError as exc:
                     res.warn(f"{host}: {exc}")
                     continue
+                except (aiohttp.ClientError, OSError) as exc:
+                    # Best-effort mərhələ: host-a çatmaq mümkün deyilsə (məs.
+                    # yalnız HTTP-də xidmət göstərən loopback/port, TLS əl
+                    # sıxışması) mərhələ "failed" OLMAMALIDIR — dürüst şəkildə
+                    # xəbərdarlıq verilir və davam olunur. Uydurma tapıntı yox.
+                    res.warn(f"{host}: əlaqə qurula bilmədi — WAF aşkarlaması "
+                             f"atlandı ({type(exc).__name__})")
+                    continue
                 if profile.detected:
                     self.ctx.note_waf(profile)
                     profiles[host] = profile.to_dict()

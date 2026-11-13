@@ -16,7 +16,7 @@ import threading
 from datetime import datetime, timezone
 
 DB_PATH = "findings.db"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: Miqrasiya olunmuş (v3 və əvvəlki) sətirlərə verilən "legacy" scan id-si.
 #: Bu dəyər HEÇ VAXT aktiv skanın hədəfi ola bilməz — `alive_hosts(scan_id)`
@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS secrets (
   id INTEGER PRIMARY KEY,
   host_id INTEGER REFERENCES hosts(id) ON DELETE CASCADE,
   js_url TEXT, kind TEXT, value_preview TEXT,
+  value_enc TEXT,
   UNIQUE(host_id, js_url, kind, value_preview)
 );
 CREATE TABLE IF NOT EXISTS stage_status (
@@ -191,6 +192,10 @@ _EXPECTED_COLUMNS = {
     },
     "urls": {
         "scan_id": "INTEGER NOT NULL DEFAULT 0",
+    },
+    # v6: şifrəli secret vault — JS-dən tapılan XAM secret-in Fernet tokeni.
+    "secrets": {
+        "value_enc": "TEXT",
     },
 }
 
@@ -382,12 +387,29 @@ def insert_finding(host_id: int, module: str, severity: str, title: str,
     return row["id"] if row else -1
 
 
-def insert_secret(host_id: int, js_url: str, kind: str, preview: str):
+def insert_secret(host_id: int, js_url: str, kind: str, preview: str,
+                  value_enc: str | None = None):
+    """Secret önizləməsini (və mümkünsə şifrəli xam dəyəri) yazır.
+
+    `value_enc` — Faza 3.2 Fernet tokeni; vault əlçatan deyilsə `None` olur və
+    HEÇ VAXT düz mətn yazılmır.
+    """
     conn = get_db()
     with conn:
         conn.execute(
-            "INSERT OR IGNORE INTO secrets(host_id,js_url,kind,value_preview) "
-            "VALUES(?,?,?,?)", (host_id, js_url, kind, preview))
+            "INSERT OR IGNORE INTO secrets(host_id,js_url,kind,value_preview,"
+            "value_enc) VALUES(?,?,?,?,?)",
+            (host_id, js_url, kind, preview, value_enc))
+
+
+def secrets_with_cipher(scan_id=None):
+    """Cari skanda şifrəli (replay oluna bilən) secret sətirlərini qaytarır."""
+    sid = effective_scan_id(scan_id)
+    return get_db().execute(
+        "SELECT s.id, s.host_id, s.js_url, s.kind, s.value_preview, s.value_enc, "
+        "h.subdomain FROM secrets s JOIN hosts h ON h.id=s.host_id "
+        "WHERE h.scan_id=? AND s.value_enc IS NOT NULL",
+        (sid,)).fetchall()
 
 
 def insert_cve(host_id: int, cve_id: str, product: str, version: str,

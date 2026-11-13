@@ -226,7 +226,7 @@ class TestMigrationV5:
 
             assert conn.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()["value"] == "5"
+            ).fetchone()["value"] == "6"
 
             # Data və id-lər qorunur; köhnə status yeni həyat dövrünə köçür.
             f = conn.execute("SELECT id,status FROM findings WHERE id=11"

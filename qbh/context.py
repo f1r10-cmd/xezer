@@ -25,6 +25,7 @@ class Context:
     _egress: Any = None
     _oob: Any = None
     _stealth: Any = None
+    _vault: Any = None
 
     def _auth(self):
         """Authorization yoxdursa konfiqdən təmin edir (fail-closed)."""
@@ -84,6 +85,19 @@ class Context:
         """WAF aşkarlamasını qeyd edir və `waf_name`-i sinxronlaşdırır."""
         self.stealth.note_waf(profile)
         self.waf_name = self.stealth.waf_name
+
+    @property
+    def vault(self):
+        """Şifrəli secret vault (Faza 3.2).
+
+        Açar yoxdursa `available=False` — bu halda JS secret-ləri yalnız
+        maskalanmış saxlanılır (düz mətn HEÇ VAXT yazılmır).
+        """
+        if self._vault is None:
+            from .vault import SecretVault
+
+            self._vault = SecretVault.from_config(self.cfg)
+        return self._vault
 
     @property
     def rate(self) -> float:

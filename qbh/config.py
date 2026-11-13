@@ -20,7 +20,7 @@ from .scope import ScopeEnforcer, ScopeError, normalize_host
 KNOWN_TOP_KEYS = {
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
-    "oob", "stealth",
+    "oob", "stealth", "vault",
 }
 
 #: Faza 2 — stealth qatının strateji variantları.
@@ -137,6 +137,20 @@ class StealthConfig:
 
 
 @dataclass
+class VaultConfig:
+    """Faza 3.2 — şifrəli secret vault konfiqurasiyası.
+
+    Açar ya `vault.key_file`-dan, ya da `QBH_VAULT_KEY` mühit dəyişənindən
+    oxunur. Heç biri yoxdursa vault `available=False` olur və JS-dən tapılan
+    secret-lər (əvvəlki kimi) YALNIZ maskalanmış saxlanılır — düz mətn HEÇ VAXT
+    yazılmır.
+    """
+
+    enabled: bool = True
+    key_file: str = ""
+
+
+@dataclass
 class ProgramRules:
     """Rules of Engagement — proqramın qadağaları."""
     forbidden: set[str] = field(default_factory=set)
@@ -162,6 +176,7 @@ class Config:
     chain: ChainConfig = field(default_factory=ChainConfig)
     oob: OOBConfig = field(default_factory=OOBConfig)
     stealth: StealthConfig = field(default_factory=StealthConfig)
+    vault: VaultConfig = field(default_factory=VaultConfig)
     program_rules: ProgramRules = field(default_factory=ProgramRules)
     warnings: list[str] = field(default_factory=list)
     _raw: dict = field(default_factory=dict)
@@ -229,13 +244,14 @@ class Config:
         chain = cls._validate_chain(raw.get("chain"))
         oob = cls._validate_oob(raw.get("oob"), aggressiveness)
         stealth = cls._validate_stealth(raw.get("stealth"), aggressiveness)
+        vault = cls._validate_vault(raw.get("vault"), warnings)
 
         return cls(
             path=path, program=program, nvd_api_key=nvd_key, scope=scope,
             limits=limits, proxy_file=proxy_file, interface=interface,
             aggressiveness=aggressiveness, rotation=rotation,
             block_strategy=block_strategy, chain=chain, oob=oob,
-            stealth=stealth,
+            stealth=stealth, vault=vault,
             program_rules=program_rules, warnings=warnings, _raw=raw,
         )
 
@@ -480,6 +496,28 @@ class Config:
                 if not isinstance(stealth[key], bool):
                     raise ConfigError(f"stealth.{key} boolean olmalıdır")
                 setattr(cfg, key, stealth[key])
+        return cfg
+
+    @staticmethod
+    def _validate_vault(vault, warnings: list[str]) -> VaultConfig:
+        """Faza 3.2 — `vault` bölməsini validasiya edir (fail-closed deyil:
+        açar yoxdursa vault sadəcə `available=False` olur)."""
+        cfg = VaultConfig()
+        if vault is None:
+            return cfg
+        if not isinstance(vault, dict):
+            raise ConfigError("vault mapping olmalıdır")
+        for key in vault:
+            if key not in ("enabled", "key_file"):
+                warnings.append(f"naməlum vault açarı: {key!r}")
+        if "enabled" in vault:
+            if not isinstance(vault["enabled"], bool):
+                raise ConfigError("vault.enabled boolean olmalıdır")
+            cfg.enabled = vault["enabled"]
+        if vault.get("key_file") is not None:
+            if not isinstance(vault["key_file"], str):
+                raise ConfigError("vault.key_file mətn olmalıdır")
+            cfg.key_file = vault["key_file"].strip()
         return cfg
 
     # ---------------- köməkçilər ----------------

@@ -122,8 +122,12 @@ class JSAnalysisEngine:
                     if len(value) < 20 or _entropy(value) < 3.0:
                         continue
                 masked = mask_value(value)
-                # Bazaya YALNIZ maskalanmış önizləmə yazılır.
-                db.insert_secret(row["host_id"], row["url"], name, masked)
+                # Bazaya YALNIZ maskalanmış önizləmə yazılır. Xam dəyər, əgər
+                # şifrəli vault əlçatandırsa, Fernet ilə şifrələnib saxlanılır
+                # (Faza 3.2) — düz mətn HEÇ VAXT yazılmır.
+                enc = self.ctx.vault.encrypt(value)
+                db.insert_secret(row["host_id"], row["url"], name, masked,
+                                 value_enc=enc)
                 severity = "high" if strong else "low"
                 db.insert_finding(
                     row["host_id"], "jsanalysis", severity,

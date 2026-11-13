@@ -29,12 +29,14 @@ from dataclasses import dataclass, field
 from . import db
 from .engines.bypass import BypassEngine
 from .engines.confirm import ConfirmEngine
+from .engines.secret_replay import SecretReplayEngine
 from .results import EngineResult
 
 #: Trigger → avtomatik davam hərəkətləri.
 TRIGGERS: dict[str, list[str]] = {
     "subdomain": ["live_check", "fingerprint", "js_analysis"],
-    "js_file": ["extract_endpoints", "extract_secrets", "test_secret_endpoints"],
+    "js_file": ["extract_endpoints", "extract_secrets", "test_secret_endpoints",
+                "secret_replay"],
     "param": ["hidden_param_detect", "param_fuzz"],
     "openapi": ["scope_validate", "schemathesis_fuzz"],
     "interesting_endpoint": ["targeted_fuzz", "sqli_suggestive"],
@@ -57,6 +59,7 @@ ACTION_EXEC = {
     "live_check": "delegated", "fingerprint": "delegated",
     "js_analysis": "delegated", "extract_endpoints": "delegated",
     "extract_secrets": "delegated", "test_secret_endpoints": "local",
+    "secret_replay": "local",
     "hidden_param_detect": "delegated", "param_fuzz": "delegated",
     "scope_validate": "local", "schemathesis_fuzz": "delegated",
     "targeted_fuzz": "delegated", "sqli_suggestive": "delegated",
@@ -308,6 +311,14 @@ class ChainPipeline:
             conf = await ConfirmEngine(self.ctx).run()
             res.findings += conf.findings
             self.executed.append("confirm_template")
+
+        # Faza 3.2: şifrəli secret replay (RoE + vault qapısı ilə).
+        if self._budget_ok() and self.auth.allows("secret_replay"):
+            self._tasks += 1
+            rep = await SecretReplayEngine(self.ctx).run()
+            res.findings += rep.findings
+            res.warnings += rep.warnings
+            self.executed.append("secret_replay")
 
         if self._budget_ok():
             boosted = self._boost_nuclei_confidence()

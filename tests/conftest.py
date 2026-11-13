@@ -138,6 +138,13 @@ async def local_server():
         state["conc"] -= 1
         return web.Response(text="ok")
 
+    # Faza 3.2: secret replay fixture — yalnız düzgün bearer token ilə 200.
+    async def secret_ok(request):
+        auth = request.headers.get("Authorization", "")
+        if auth == "Bearer valid-token-1234567890":
+            return web.Response(text="granted-access-body")
+        return web.Response(status=401, text="unauthorized")
+
     app = web.Application()
     app.add_routes([
         web.get("/", index),
@@ -151,6 +158,7 @@ async def local_server():
         web.get("/slow", slow),
         web.get("/count", count),
         web.get("/conc", conc),
+        web.get("/secret", secret_ok),
     ])
     runner = web.AppRunner(app)
     await runner.setup()

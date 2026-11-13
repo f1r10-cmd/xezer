@@ -92,8 +92,10 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
     cves = [dict(r) for r in conn.execute(
         f"SELECT * FROM cve_matches WHERE host_id IN ({scan_sub}) "
         "ORDER BY in_kev DESC, epss DESC", (sid,)).fetchall()]
+    # `value_enc` (Faza 3.2 şifrəli token) QƏSDƏN seçilmir — hesabata düşməz.
     secrets = [dict(r) for r in conn.execute(
-        f"SELECT * FROM secrets WHERE host_id IN ({scan_sub})", (sid,)).fetchall()]
+        "SELECT id, host_id, js_url, kind, value_preview FROM secrets "
+        f"WHERE host_id IN ({scan_sub})", (sid,)).fetchall()]
     evidence = [dict(r) for r in conn.execute(
         "SELECT e.* FROM evidence e JOIN findings f ON f.id=e.finding_id "
         f"WHERE f.host_id IN ({scan_sub}) ORDER BY e.id", (sid,)).fetchall()]

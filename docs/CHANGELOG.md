@@ -3,6 +3,73 @@
 Bu sənəd audit, hardening və offensive genişləndirmə işləri zamanı edilmiş
 əhəmiyyətli arxitektura və davranış dəyişikliklərini qeyd edir.
 
+## [3.0] — Faza 3: secret vault, takeover, real zəncir, hunter, stealth
+
+Faza 2-nin offensive əsası üzərində qurulub. Bütün yeni imkanlar **eyni
+toxunulmaz sərhəd** altındadır: avtorizasiya scope-u (fail-closed) və
+`program_rules.forbidden` (RoE). Qadağan olunan addım icra olunmur, atlanır
+və audit loquna yazılır.
+
+### 3.1 State-dəyişən əməliyyat qapısı
+
+- `--allow-state-changing` bayrağı və `Authorization`-a `state_changing`
+  əməliyyatı əlavə olundu. Profil/RoE bunu qadağan edərsə, state-dəyişən
+  addımlar fail-closed şəkildə atlanır.
+
+### 3.2 Şifrəli secret vault + `secret_replay`
+
+- `qbh/vault.py` — JS-də tapılan xam secret-lər **Fernet** (`cryptography`)
+  ilə şifrələnərək saxlanılır; açar konfiqdən (`vault`) və ya mühit
+  dəyişənindən götürülür.
+- `qbh/engines/secret_replay.py` — tapılan secret-i hədəfə qarşı yoxlayır;
+  RoE `secret_replay` qadağan edirsə **atla + audit** (trafik göndərilmir).
+- Hesabat/loq üçün extradan `redact`/`mask_value` istifadə olunur — xam
+  secret heç vaxt açıq yazılmır.
+
+### 3.3 CNAME takeover detektoru
+
+- `qbh/engines/takeover.py` — `dnspython` ilə dangling CNAME aşkarlayır,
+  zəif provayder imzaları ilə uyğunlaşdırır və təsdiq mərhələsi ilə
+  yanlış-pozitivi azaldır.
+
+### 3.4 Zəncir addımlarının real icrası
+
+- `qbh/chain.py` — əvvəl `delegated` kimi yalnız planlaşdırılan
+  `param_fuzz`, `hidden_param_detect`, `schemathesis_fuzz` addımları indi
+  `ChainPipeline` daxilində **birbaşa** və RoE qapılarından keçməklə icra
+  olunur.
+
+### 3.5 Hunter orkestratoru
+
+- `qbh/hunter.py` + `--mode hunt` — avtomatik zəncir: subdomain → canlı
+  yoxlama → fingerprint → JS → secret/param → fuzz → CVE → confirm → PoC →
+  hesabat. 401/403 hallarında bypass matrisi; yüksək dəyərli endpoint-lər
+  (admin/login/upload) üçün dərin zəncirlər.
+
+### 3.6 Stealth & low-detection (adaptiv)
+
+- Yeni `qbh/stealth/humanize.py` (`Humanizer`) — real mobil+masaüstü UA
+  hovuzu, brauzer başlıq setləri (`Sec-Fetch-*`, `Accept-Language`),
+  təsadüfi jitter (0.5–3 s).
+- Yeni `qbh/stealth/policy.py` (`StealthPlan`, `build_plan`) — WAF
+  aşkarlamasını **tək qərara** çevirir və real alət parametrlərinə bağlayır.
+- `StealthStack.plan()` və audit qeydi (`stealth_plan`).
+- **Adaptiv qaydalar:** WAF var → rate ≤ 3 rps, concurrency ≤ 5, UA rotasiyası
+  ON, geniş template istisnası (`-exclude-tags`); WAF yox → ≤ 10 rps;
+  `waf_adapt=False` → dəyişmir (səbəb auditdə).
+- Mühərriklər plana qoşuldu: `nuclei` (`-rl`/`-c`/`-H`), `ffuf`
+  (`-rate`/`-t`), `feroxbuster` (`--rate-limit`/`-t`), `httpx`
+  (`-rate-limit`), `naabu` (`-rate`).
+- Sənəd: `docs/STEALTH.md` (A→F workflow, adaptiv cədvəl, humanization, alət
+  bayrağı dürüst qeydləri).
+
+### Versiya və baza
+
+- `qbh.__version__` → `3.0.0`; `SCHEMA_VERSION` → `6`.
+- Test dəsti **550 test** (549 keçir, 1 POSIX-only skip); `tests/test_vault.py`,
+  `tests/test_takeover.py`, `tests/test_hunter.py`, `tests/test_stealth.py`
+  əlavə olundu.
+
 ## [2.2] — Offensive bug bounty maksimallaşdırma
 
 Fəlsəfə dəyişdi: **"topla, sonra süz" → "tap, sonra təsdiqlə"**.

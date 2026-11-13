@@ -134,7 +134,7 @@ davranış **deterministikdir** (test edilir: `tests/test_rotation.py`).
 - **Confidence:** hər tapıntı üçün hesablanır; `confirm` mərhələsi onu
   qaldırır, `reject` isə 0.1-ə salır.
 - Köhnə adlar (`potential`, `verified`, `false-positive`) migrasiya ilə
-  avtomatik çevrilir (`db.py :: normalize_status`, `SCHEMA_VERSION = 4`).
+  avtomatik çevrilir (`db.py :: normalize_status`, cari `SCHEMA_VERSION = 6`).
 
 ---
 

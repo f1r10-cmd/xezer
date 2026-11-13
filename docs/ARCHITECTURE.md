@@ -1,4 +1,4 @@
-# Arxitektura — QBH v2.1 "Xəzər"
+# Arxitektura — QBH v3.0 "Xəzər"
 
 Bu sənəd QBH-ın faktiki implementasiyasını təsvir edir. Burada yalnız
 mövcud və yoxlanılmış davranış əks olunur.
@@ -16,7 +16,10 @@ main.py  (CLI)
          ├── Context        — mühərriklərə ötürülən paylaşılan vəziyyət
          ├── Guardian       — scope + rate + cooldown/circuit-breaker + audit
          │     └── HttpPolicy — vahid HTTP sorğu siyasəti
+         ├── StealthStack   — WAF adaptasiyası + humanizasiya + pacing/proxy
+         ├── Hunter         — avtomatik zəncir (--mode hunt)
          ├── Engines[]      — recon / vuln / api / cve / validation
+         ├── vault.py       — şifrəli secret vault (Fernet)
          ├── installer.py   — tool aşkarlama + quraşdırma
          ├── db.py          — SQLite qatı
          └── report/generator.py — Markdown + JSON hesabat
@@ -46,9 +49,19 @@ qbh-xazar/
 │   ├── context.py              # Context dataclass
 │   ├── results.py              # EngineResult, StageResult
 │   ├── redact.py               # secret maskalama
-│   ├── db.py                   # SQLite sxem (v4) + miqrasiya + dedup + evidence
+│   ├── vault.py                # şifrəli secret vault (Fernet)
+│   ├── hunter.py               # Hunter orkestratoru (--mode hunt)
+│   ├── db.py                   # SQLite sxem (v6) + miqrasiya + dedup + evidence
 │   ├── installer.py            # tool aşkarlama/quraşdırma
 │   ├── conductor.py            # orkestrasiya
+│   ├── stealth/                # WAF adaptasiyası, humanizasiya, pacing, proxy
+│   │   ├── waf.py              # WAF imzaları + rate/tamper/encoding
+│   │   ├── policy.py           # StealthPlan / build_plan (adaptiv qərar)
+│   │   ├── humanize.py         # UA hovuzu + brauzer başlıqları + jitter
+│   │   ├── impersonate.py      # TLS/HTTP2 brauzer təqlidi
+│   │   ├── pacing.py           # sorğular arası temp
+│   │   ├── proxy.py            # proxy strategiyası
+│   │   └── ladder.py           # eskalasiya nərdivanı
 │   ├── antiblock/
 │   │   ├── guardian.py         # blok/cooldown + adaptiv strategiya nəzarəti
 │   │   ├── identity.py         # configurable identiklik + rotasiya audit
@@ -57,7 +70,7 @@ qbh-xazar/
 │   ├── engines/                # bütün mühərriklər
 │   ├── adapters/base.py        # shell-siz subprocess icrası
 │   └── report/                 # generator + HackerOne exporters
-├── tests/                      # pytest dəsti (242 test)
+├── tests/                      # pytest dəsti (550 test)
 └── docs/
 ```
 
@@ -110,7 +123,7 @@ Subprocess hədəfləri əvvəlcə `qbh/egress.EgressController`-dən keçir
 
 ### 6. Baza (`qbh/db.py`)
 
-- Açıq sxem + `SCHEMA_VERSION` (hazırda 4) + `_migrate()` ilə təhlükəsiz
+- Açıq sxem + `SCHEMA_VERSION` (hazırda 6) + `_migrate()` ilə təhlükəsiz
   sütun əlavələri (mövcud data silinmir).
 - `init_db()` sırası: **cədvəllər → `_migrate` → indekslər**. İndekslər
   `fingerprint` sütunundan asılıdır və köhnə bazalarda bu sütun sonradan
@@ -136,3 +149,15 @@ resolve_targets() → deep_enum → recon → fingerprint
   → api_enum → api_fuzz → param_enum → race → cve_intel → validation
   → generate_report() → finish_scan()
 ```
+
+## Məlumat axını (hunt mode — `qbh/hunter.py`)
+
+```
+subdomain → alive → fingerprint → JS → secret/param → fuzz → CVE
+  → confirm → PoC → report
+```
+
+Hər addım `Authorization` (scope + RoE) qapısından keçir; 401/403 hallarında
+bypass matrisi işə düşür, yüksək dəyərli endpoint-lər (admin/login/upload)
+üçün daha dərin zəncir qurulur. Stealth qatı (`StealthStack.plan()`) hər
+alət mərhələsi üçün rate/concurrency/UA qərarını verir və auditə yazır.

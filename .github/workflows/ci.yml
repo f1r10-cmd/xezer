@@ -59,3 +59,21 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  smoke:
+    name: Loopback smoke (CLI end-to-end)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Byte-compile (import/syntax gate)
+        run: python -m compileall -q qbh main.py
+      - name: Report mode smoke (reads DB, no network)
+        run: python main.py --config config/examples/example_local.yaml --mode report
+      - name: Full-pipeline and report smoke tests
+        run: python -m pytest tests/test_smoke.py -q

@@ -90,7 +90,9 @@ class Conductor:
             getattr(args, "proxy", "off"))
         self.guardian = Guardian(self.identity, policy)
         self.authorization = build_authorization(
-            cfg, scan_id=None, canceller=asyncio.Event())
+            cfg, scan_id=None, canceller=asyncio.Event(),
+            allow_state_changing=bool(
+                getattr(args, "allow_state_changing", False)))
 
         self.scan_id: int | None = None
         self.stages: list[StageResult] = []

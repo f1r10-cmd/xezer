@@ -127,6 +127,34 @@ class TestRuleGating:
         assert from_config(cfg).allows("intrusive_templates") is True
 
 
+# ---------------------------------------------------------------- state changing
+class TestStateChangingGate:
+    """`--allow-state-changing` default OFF; proqram RoE-si həmişə qalib gəlir."""
+
+    def test_default_off(self, load_config):
+        cfg = _scope(load_config, ["example.com"])
+        assert from_config(cfg).allows("state_changing") is False
+
+    def test_explicit_flag_enables(self, load_config):
+        cfg = _scope(load_config, ["example.com"])
+        auth = from_config(cfg, allow_state_changing=True)
+        assert auth.allows("state_changing") is True
+
+    def test_roe_forbid_overrides_flag(self, load_config):
+        cfg = _scope(load_config, ["example.com"],
+                     extra={"program_rules": {"forbidden": ["state_changing"]}})
+        auth = from_config(cfg, allow_state_changing=True)
+        assert auth.allows("state_changing") is False
+        with pytest.raises(RuleForbidden):
+            auth.require("state_changing")
+
+    def test_summary_reports_state_changing(self, load_config):
+        cfg = _scope(load_config, ["example.com"])
+        assert from_config(cfg).summary()["state_changing"] is False
+        assert from_config(
+            cfg, allow_state_changing=True).summary()["state_changing"] is True
+
+
 # ---------------------------------------------------------------- lifecycle
 class TestCancellationAndDeadline:
     def test_cancel_marks_cancelled_and_raises(self):

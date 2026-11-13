@@ -58,9 +58,11 @@ BLOCK_429_STRATEGIES = {"respect", "rotate", "backoff_then_rotate"}
 BLOCK_403_STRATEGIES = {"backoff", "rotate", "escalate_bypass"}
 
 #: Proqramın istifadəsini qadağan edə biləcəyi hərəkətlər.
+#: `state_changing` — state dəyişən HTTP metodları (POST/PUT/PATCH/DELETE);
+#: default olaraq qadağandır və yalnız `--allow-state-changing` ilə açılır.
 ALL_ACTIONS = {
     "active_fuzz", "intrusive_templates", "bypass", "cve_poc",
-    "secret_replay", "param_fuzz", "race",
+    "secret_replay", "param_fuzz", "race", "state_changing",
 }
 
 

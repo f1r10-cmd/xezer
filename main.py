@@ -69,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="aktiv fuzzinqi MƏCBURİ YANDIR (profil default-u ON)")
     p.add_argument("--no-active-fuzz", dest="active_fuzz", action="store_false",
                    help="aktiv fuzzinqi söndür (passive yoxlama rejimi)")
+    p.add_argument("--allow-state-changing", dest="allow_state_changing",
+                   action="store_true", default=False,
+                   help="state dəyişən HTTP metodlarına (POST/PUT/PATCH/DELETE) "
+                        "icazə ver — default OFF; proqram RoE-si həmişə qalib gəlir")
     p.add_argument("--race-fixture", default=None,
                    help="race testi üçün YALNIZ lokal loopback fixture URL-i")
     p.add_argument("--race-count", type=int, default=10,

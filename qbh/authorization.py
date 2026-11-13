@@ -52,6 +52,10 @@ class Authorization:
     canceller: "asyncio.Event | None" = None
     profile_active_fuzz: bool = True
     profile_intrusive: bool = True
+    #: State dəyişən HTTP metodları (POST/PUT/PATCH/DELETE) üçün CLI qapısı.
+    #: Default OFF — yalnız `--allow-state-changing` ilə açılır; proqram RoE-si
+    #: (`forbidden`) həmişə qalib gəlir.
+    allow_state_changing: bool = False
     _cancelled: bool = False
 
     # ------------------------------------------------------------------ scope
@@ -111,6 +115,8 @@ class Authorization:
             return False
         if action == "intrusive_templates" and not self.profile_intrusive:
             return False
+        if action == "state_changing" and not self.allow_state_changing:
+            return False
         return True
 
     def require(self, action: str) -> None:
@@ -159,13 +165,15 @@ class Authorization:
             "aggressiveness": self.aggressiveness,
             "wildcard_expansion": self.allows_wildcard_expansion(),
             "forbidden": sorted(self.rules.forbidden),
+            "state_changing": self.allows("state_changing"),
             "cancelled": self.is_cancelled(),
             "expired": self.expired(),
         }
 
 
 def from_config(cfg, scan_id: int | None = None, *, deadline: float | None = None,
-                canceller: "asyncio.Event | None" = None) -> Authorization:
+                canceller: "asyncio.Event | None" = None,
+                allow_state_changing: bool = False) -> Authorization:
     """`Config`-dən avtorizasiya konteksti qurur."""
     return Authorization(
         scan_id=scan_id,
@@ -176,4 +184,5 @@ def from_config(cfg, scan_id: int | None = None, *, deadline: float | None = Non
         canceller=canceller,
         profile_active_fuzz=bool(cfg.profile.get("active_fuzz", True)),
         profile_intrusive=bool(cfg.profile.get("intrusive_templates", True)),
+        allow_state_changing=bool(allow_state_changing),
     )

@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .humanize import Humanizer
 from .impersonate import (
     ImpersonatingTransport,
     impersonation_available,
@@ -28,6 +29,7 @@ from .impersonate import (
 )
 from .ladder import EscalationLadder, LadderDecision
 from .pacing import Pacer
+from .policy import StealthPlan, build_plan
 from .proxy import ProxyPlan, is_sensitive_phase, plan_proxy
 from .waf import WafProfile, detect_waf, encodings_for, rate_factor_for, tamper_for
 
@@ -45,6 +47,7 @@ class StealthStack:
     pacer: Pacer | None = None
     waf: WafProfile = field(default_factory=WafProfile)
     audit: list = field(default_factory=list)
+    humanizer: Humanizer = field(default_factory=Humanizer)
 
     @property
     def waf_name(self) -> str:
@@ -64,6 +67,22 @@ class StealthStack:
             getattr(cfg, "proxy_strategy", "off"), phase,
             tor_for_sensitive_only=getattr(cfg, "tor_for_sensitive_only", True))
 
+    def plan(self, base_rate: float, *, base_concurrency: int = 25,
+             phase: str = "") -> StealthPlan:
+        """Aşkarlanmış WAF-a görə konkret alət parametrlərini hesablayır.
+
+        Qərar audit olunur (`waf_detected` kimi) → hansı sürətin və
+        template seçiminin nə üçün dəyişdiyi sonradan izlənə bilər.
+        """
+        cfg = self.cfg
+        p = build_plan(
+            waf_name=self.waf_name, base_rate=base_rate,
+            base_concurrency=base_concurrency,
+            waf_adapt=bool(getattr(cfg, "waf_adapt", True)))
+        self.audit.append({"event": "stealth_plan", "phase": phase,
+                           **p.to_dict()})
+        return p
+
     def summary(self) -> dict:
         return {
             "impersonate": (self.transport.summary() if self.transport
@@ -75,12 +94,15 @@ class StealthStack:
 
 __all__ = [
     "EscalationLadder",
+    "Humanizer",
     "ImpersonatingTransport",
     "LadderDecision",
     "Pacer",
     "ProxyPlan",
+    "StealthPlan",
     "StealthStack",
     "WafProfile",
+    "build_plan",
     "detect_waf",
     "encodings_for",
     "impersonation_available",

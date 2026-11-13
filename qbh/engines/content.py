@@ -15,7 +15,6 @@ import tempfile
 
 from .. import db
 from ..adapters.base import limited_wordlist, run_process
-from ..antiblock.ua_rotator import ua_for
 from ..results import EngineResult
 from ..scope import ScopeError
 
@@ -74,16 +73,22 @@ class ContentEngine:
             res.warn(f"{host}: wordlist {MAX_WORDS} sətrə məhdudlaşdırıldı")
         fd, out_file = tempfile.mkstemp(prefix="qbh_ffuf_", suffix=".json")
         os.close(fd)
+        # Faza 3.6: WAF-a görə rate/concurrency + insan-təqlidi başlıqlar.
+        plan = self.ctx.stealth.plan(
+            self.rate * 8, base_concurrency=10, phase="ffuf")
+        ua = self.ctx.stealth.humanizer.ua()
         try:
-            proc = await run_process([
+            args = [
                 "ffuf", "-w", wordlist,
                 "-u", f"https://{host}/FUZZ",
-                "-rate", str(max(1, int(self.rate * 8))),
-                "-H", f"User-Agent: {ua_for(host)}",
-                "-t", "10", "-ac",
+                "-rate", str(plan.rate_arg()),
+                "-H", f"User-Agent: {ua}",
+                "-H", "Accept-Language: en-US,en;q=0.9",
+                "-t", str(plan.concurrency), "-ac",
                 "-of", "json", "-o", out_file,
                 "-mc", MATCH_CODES,
-            ], timeout=TIMEOUT)
+            ]
+            proc = await run_process(args, timeout=TIMEOUT)
             if proc.missing:
                 res.warn("ffuf tapılmadı — atlandı")
                 return

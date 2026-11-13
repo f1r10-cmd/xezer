@@ -15,7 +15,6 @@ import tempfile
 
 from .. import db
 from ..adapters.base import limited_wordlist, run_process
-from ..antiblock.ua_rotator import ua_for
 from ..results import EngineResult
 from ..scope import ScopeError
 
@@ -75,14 +74,18 @@ class FeroxEngine:
             res.warn(f"{host}: wordlist {MAX_WORDS} sətrə məhdudlaşdırıldı")
         fd, out_file = tempfile.mkstemp(prefix="qbh_ferox_", suffix=".jsonl")
         os.close(fd)
+        # Faza 3.6: WAF-a görə rate/concurrency + insan-təqlidi UA.
+        plan = self.ctx.stealth.plan(
+            self.rate * 10, base_concurrency=10, phase="ferox")
+        ua = self.ctx.stealth.humanizer.ua()
         try:
             proc = await run_process([
                 "feroxbuster",
                 "-u", f"https://{host}",
                 "-w", wordlist,
-                "-H", f"User-Agent: {ua_for(host)}",
-                "--rate-limit", str(max(1, int(self.rate * 10))),
-                "-t", "10",
+                "-H", f"User-Agent: {ua}",
+                "--rate-limit", str(plan.rate_arg()),
+                "-t", str(plan.concurrency),
                 "--depth", str(MAX_DEPTH),
                 "--extensions", "json,bak,old,txt,php",
                 "--no-state", "--quiet", "--json",

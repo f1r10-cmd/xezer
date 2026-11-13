@@ -77,9 +77,13 @@ class ReconEngine:
 
     async def _httpx(self, subdomains: list[str]) -> list[dict]:
         inp = "\n".join(subdomains)
+        # Faza 3.6: ilk təmas — random UA + təmkinli rate (WAF hələ bilinmir).
+        plan = self.ctx.stealth.plan(
+            self.rate * 10, base_concurrency=50, phase="httpx")
         res = await run_process(
             ["httpx", "-json", "-silent", "-tech-detect", "-title",
-             "-cdn", "-status-code", "-no-color"],
+             "-cdn", "-status-code", "-no-color", "-random-agent",
+             "-rate-limit", str(plan.rate_arg())],
             stdin=inp.encode(), timeout=600)
         alive: list[dict] = []
         if res.missing:
@@ -123,6 +127,10 @@ class ReconEngine:
         return alive
 
     async def _naabu(self, alive: list[dict], res: EngineResult):
+        # Faza 3.6: port taraması tempi WAF qərarına uyğunlaşdırılır.
+        plan = self.ctx.stealth.plan(
+            self.rate * 10, base_concurrency=30, phase="ports")
+        rate = plan.rate_arg()
         for h in alive[:30]:
             if self._skip(h["host"], res):
                 continue
@@ -132,7 +140,7 @@ class ReconEngine:
             # IP scope-da deyilsə (yalnız host icazəlidirsə) DNS adı ilə davam et
             if not self.cfg.in_scope(target):
                 target = h["host"]
-            ports = await self._naabu_scan(target)
+            ports = await self._naabu_scan(target, rate)
             if ports:
                 db.insert_finding(
                     h["id"], "recon", "info",
@@ -144,9 +152,10 @@ class ReconEngine:
                 res.findings += 1
 
     @staticmethod
-    async def _naabu_scan(target: str) -> list[str]:
+    async def _naabu_scan(target: str, rate: int = 30) -> list[str]:
         r = await run_process(
-            ["naabu", "-host", target, "-top-ports", "100", "-silent",
+            ["naabu", "-host", target, "-top-ports", "100",
+             "-rate", str(max(1, int(rate))), "-silent",
              "-json", "-no-color"], timeout=180)
         if r.missing or r.timed_out:
             return []

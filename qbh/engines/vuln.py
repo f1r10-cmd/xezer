@@ -107,14 +107,27 @@ class VulnEngine:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(targets))
 
+            # Faza 3.6: WAF aşkarlanması → sürət/concurrency/template uyğunlaşması.
+            plan = self.ctx.stealth.plan(
+                self.rate * 3, base_concurrency=25, phase="nuclei")
+            exclude = list(self._exclude_tags())
+            # WAF varsa → profil nə olursa olsun mühafizəkar (geniş) siyahı.
+            extra = (list(EXCLUDE_TAGS) if plan.detected
+                     else list(plan.extra_exclude_tags))
+            for tag in extra:
+                if tag not in exclude:
+                    exclude.append(tag)
             args = ["nuclei", "-l", target_file,
                     "-severity", SAFE_SEVERITIES,
                     "-tags", ",".join(tags),
-                    "-exclude-tags", ",".join(self._exclude_tags()),
-                    "-rl", str(max(5, int(self.rate * 3))), "-c", "25",
+                    "-exclude-tags", ",".join(exclude),
+                    "-rl", str(plan.rate_arg()), "-c", str(plan.concurrency),
                     "-timeout", "10", "-retries", "1",
                     "-no-interactsh", "-jsonl", "-silent", "-no-color",
                     "-stats=false"]
+            if plan.ua_rotation:
+                for key, value in self.ctx.stealth.humanizer.headers().items():
+                    args += ["-H", f"{key}: {value}"]
             proc = await run_process(args, timeout=3600)
         finally:
             try:

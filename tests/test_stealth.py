@@ -19,10 +19,12 @@ import random
 
 import pytest
 
-from qbh.stealth import (EscalationLadder, ImpersonatingTransport, Pacer,
-                         StealthStack, WafProfile, detect_waf, encodings_for,
-                         impersonation_available, is_sensitive_phase,
-                         plan_proxy, rate_factor_for, resolve_target, tamper_for)
+from qbh.stealth import (EscalationLadder, Humanizer, ImpersonatingTransport,
+                         Pacer, StealthStack, WafProfile, build_plan, detect_waf,
+                         encodings_for, impersonation_available,
+                         is_sensitive_phase, plan_proxy, rate_factor_for,
+                         resolve_target, tamper_for)
+from qbh.stealth.humanize import (HEADER_SETS, JITTER_MAX, JITTER_MIN, UA_POOL)
 from qbh.stealth.ladder import LEVELS, MAX_LEVEL
 
 
@@ -319,3 +321,167 @@ class TestStealthStack:
     def test_summary_shape(self):
         s = StealthStack().summary()
         assert set(s) == {"impersonate", "pacing", "waf"}
+
+
+# ------------------------------------------------- adaptive policy (Faza 3.6)
+class TestBuildPlan:
+    def test_no_waf_keeps_speed_under_ceiling(self):
+        p = build_plan(waf_name="", base_rate=300, base_concurrency=25)
+        assert p.detected is False
+        assert p.rate_factor == 1.0
+        assert p.effective_rate == 10.0
+        assert p.concurrency == 25
+        assert p.ua_rotation is False
+        assert p.extra_exclude_tags == ()
+        assert p.tamper == () and p.encodings == ()
+
+    def test_waf_reduces_rate_and_templates(self):
+        p = build_plan(waf_name="cloudflare", base_rate=300, base_concurrency=25)
+        assert p.detected is True
+        assert p.rate_factor == 0.5
+        assert p.effective_rate == 3.0
+        assert p.concurrency == 5
+        assert p.ua_rotation is True
+        assert p.extra_exclude_tags == ("fuzz", "fuzzing", "intrusive")
+        assert p.tamper == tuple(tamper_for("cloudflare"))
+        assert p.encodings == tuple(encodings_for("cloudflare"))
+        assert "cloudflare" in p.reason
+
+    def test_waf_factor_applied_below_ceiling(self):
+        p = build_plan(waf_name="fastly", base_rate=4, base_concurrency=3)
+        assert p.rate_factor == 0.7
+        assert p.effective_rate == pytest.approx(2.8)
+        assert p.concurrency == 3
+
+    def test_waf_adapt_disabled_no_change(self):
+        p = build_plan(waf_name="imperva", base_rate=300, base_concurrency=25,
+                       waf_adapt=False)
+        assert p.detected is True
+        assert p.rate_factor == 1.0
+        assert p.effective_rate == 10.0
+        assert p.concurrency == 25
+        assert p.ua_rotation is False
+        assert "waf_adapt" in p.reason
+
+    def test_none_waf_name_is_not_detected(self):
+        assert build_plan(waf_name="none").detected is False
+
+    def test_rate_arg_min_one(self):
+        assert build_plan(waf_name="cloudflare", base_rate=0.1).rate_arg() >= 1
+
+    def test_to_dict_shape(self):
+        d = build_plan(waf_name="akamai", base_rate=30).to_dict()
+        assert set(d) == {"waf", "detected", "rate_factor", "base_rate",
+                          "effective_rate", "concurrency", "ua_rotation",
+                          "jitter", "tamper", "encodings",
+                          "extra_exclude_tags", "reason"}
+
+
+class TestStealthStackPlan:
+    def test_plan_records_audit(self):
+        stack = StealthStack()
+        p = stack.plan(300, phase="nuclei")
+        assert p.detected is False
+        assert stack.audit[-1]["event"] == "stealth_plan"
+        assert stack.audit[-1]["phase"] == "nuclei"
+        assert stack.audit[-1]["effective_rate"] == 10.0
+
+    def test_plan_reflects_detected_waf(self):
+        stack = StealthStack()
+        stack.note_waf(detect_waf(headers={"CF-Ray": "x"}))
+        p = stack.plan(300, phase="nuclei")
+        assert p.detected is True
+        assert p.effective_rate <= 3.0
+
+    def test_plan_respects_waf_adapt_flag(self):
+        from qbh.config import StealthConfig
+
+        stack = StealthStack(cfg=StealthConfig(waf_adapt=False))
+        stack.note_waf(WafProfile(name="cloudflare", confidence=0.9))
+        assert stack.plan(300).rate_factor == 1.0
+
+
+# -------------------------------------------------------- humanization (3.6)
+class TestHumanizer:
+    def test_ua_rotates_through_pool(self):
+        h = Humanizer(rng=random.Random(1))
+        seen = [h.ua() for _ in range(len(UA_POOL) + 1)]
+        assert seen[0] == UA_POOL[0]
+        assert seen[len(UA_POOL)] == UA_POOL[0]  # dövrəli rotasiya
+        assert len(set(seen)) == len(UA_POOL)
+
+    def test_headers_include_browser_fingerprint(self):
+        h = Humanizer(rng=random.Random(2))
+        hdrs = h.headers("chrome")
+        assert hdrs["User-Agent"] in UA_POOL
+        assert "Sec-Fetch-Site" in hdrs
+        assert hdrs["Accept-Language"]
+
+    def test_every_family_has_sec_fetch_headers(self):
+        for family, headers in HEADER_SETS.items():
+            assert headers.get("Accept"), family
+            assert "Sec-Fetch-Dest" in headers, family
+
+    def test_jitter_in_range_and_deterministic(self):
+        a = Humanizer(rng=random.Random(5))
+        b = Humanizer(rng=random.Random(5))
+        for _ in range(50):
+            ja, jb = a.jitter(), b.jitter()
+            assert JITTER_MIN <= ja <= JITTER_MAX
+            assert ja == jb
+
+    def test_state_shape(self):
+        st = Humanizer().state()
+        assert set(st) == {"index", "ua_pool", "families", "jitter"}
+
+
+# ------------------------------------------------ adaptive wiring (Faza 3.6)
+class TestAdaptiveToolWiring:
+    """WAF nəticəsi REAL alət parametrlərini dəyişir (loopback, şəbəkəsiz)."""
+
+    def _seed(self, scan_id=1):
+        from qbh import db
+
+        return db.upsert_host("127.0.0.1", scan_id=scan_id, status_code=200)
+
+    async def _capture(self, make_ctx, monkeypatch, *, waf=False):
+        from qbh.adapters.base import ProcResult
+        from qbh.authorization import from_config
+        from qbh.engines import vuln as vuln_mod
+        from qbh.stealth import detect_waf
+
+        calls = []
+
+        async def fake(cmd, **kw):
+            calls.append(list(cmd))
+            return ProcResult(0, stdout=b"")
+
+        monkeypatch.setattr(vuln_mod, "run_process", fake)
+        ctx = make_ctx()
+        ctx.authorization = from_config(ctx.cfg)
+        ctx.scan_id = 1
+        if waf:
+            ctx.note_waf(detect_waf(headers={"CF-Ray": "x"}))
+        await vuln_mod.VulnEngine(ctx).run()
+        return calls
+
+    async def test_no_waf_uses_higher_rate(self, tmp_db, make_ctx, monkeypatch):
+        self._seed()
+        calls = await self._capture(make_ctx, monkeypatch, waf=False)
+        assert calls, "nuclei çağırışı gözlənilirdi"
+        cmd = calls[0]
+        assert cmd[cmd.index("-rl") + 1] == "10"
+        assert cmd[cmd.index("-c") + 1] == "25"
+        assert "-H" not in cmd  # WAF yox → UA rotasiyası yoxdur
+
+    async def test_waf_lowers_rate_and_templates(self, tmp_db, make_ctx,
+                                                monkeypatch):
+        self._seed()
+        calls = await self._capture(make_ctx, monkeypatch, waf=True)
+        assert calls
+        cmd = calls[0]
+        assert cmd[cmd.index("-rl") + 1] == "3"
+        assert cmd[cmd.index("-c") + 1] == "5"
+        excl = cmd[cmd.index("-exclude-tags") + 1]
+        assert "intrusive" in excl       # mühafizəkar template siyahısı
+        assert "-H" in cmd               # UA rotasiyası → insan başlıqları

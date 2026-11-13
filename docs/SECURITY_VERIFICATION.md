@@ -8,8 +8,8 @@ YALNIZ həm **implementasiya olunduqda**, həm də **test edildikdə** verilir.
 ```
 $ .venv/bin/python -m compileall -q qbh main.py   → COMPILE_OK
 $ .venv/bin/python -m ruff check --select E4,E7,E9,F,B,W .  → All checks passed!
-$ .venv/bin/python -m pytest                      → 550 collected (549 passed, 1 skipped)
-$ .venv/bin/python -m pytest --cov=qbh            → TOTAL 70%
+$ .venv/bin/python -m pytest                      → 557 collected (556 passed, 1 skipped)
+$ .venv/bin/python -m pytest --cov=qbh            → TOTAL 72%
 ```
 
 Bütün testlər **yalnız** `127.0.0.1`/`localhost` loopback fixture-larına qarşı
@@ -45,7 +45,7 @@ işləyir — **CI heç bir xarici hədəfə trafik göndərmir**.
 | Hər engine `EngineResult` qaytarır | ✅ **PASS** | `test_engines.py::TestEngineContract` (parametrized, 12 mühərrik) | Boş bazada xətasız `skipped` |
 | `shell=True` yoxdur | ✅ **PASS** | `adapters/base.py` (`asyncio.create_subprocess_exec`); ruff/grep | Command injection mümkün deyil |
 | CI (lint + test + secret scan) | ✅ **PASS** | `.github/workflows/ci.yml`, `.gitleaks.toml`, `requirements-dev.txt` | Yalnız loopback testləri |
-| "Tool missing" dürüst raportu | ⚠️ **PARTIAL** | `adapters/base.py` `proc.missing`; engine-lərdə `res.warn("... tapılmadı")` | Mexanizm mövcuddur, lakin ayrıca avtomatik testi **yoxdur** |
+| "Tool missing" dürüst raportu | ✅ **PASS** | `test_tool_missing.py` (recon/vuln/content/ferox/param_enum/api_enum/deep_enum → `ProcResult(missing=True)` → `res.warn`, uydurma tapıntı yox) | 7 mühərrik üzrə avtomatik test; `adapters/base.py` `proc.missing` mexanizmi |
 | Şifrəli secret vault (Faza 3.2) | ✅ **PASS** | `test_vault.py` (Fernet şifrə/açma, açar idarəsi, round-trip, korrupsiya), `TestSecretReplay` | Xam secret şifrəli saxlanılır; hesabat/loqda `redact`; RoE `secret_replay` qadağan edərsə atla + audit |
 | CNAME takeover (Faza 3.3) | ✅ **PASS** | `test_takeover.py` (dangling CNAME, provayder imzaları, təsdiq, yanlış-pozitiv) | `dnspython` əsaslı aşkarlama + təsdiq mərhələsi |
 | Hunter orkestratoru (Faza 3.5) | ✅ **PASS** | `test_hunter.py`, `main.py --mode hunt` | Avtomatik zəncir + 401/403 bypass matrisi; hər addım RoE-dan keçir |
@@ -75,11 +75,15 @@ Faza 3 ilə əvvəlki çatışmazlıqlar bağlandı:
 Yalnız aşağıdakı qeyd qalır: OS səviyyəli per-request sandbox tələb olunan
 tam şəbəkə izolyasiyası — sənədləşdirilmiş məhdudiyyətdir.
 
-### 3.2 "Tool missing" raportu — PARTIAL
+### 3.2 "Tool missing" raportu — HƏLL OLUNDU (Faza 4.2)
 
 `run_process()` `missing=True` qaytarır və hər engine `res.warn(...)` ilə
-dürüst xəbərdarlıq verir; lakin bu davranışın **avtomatik testi yoxdur**
-(CI-da xarici alət quraşdırılmır).
+dürüst xəbərdarlıq verir. Bu davranış artıq **avtomatik test olunur**:
+`test_tool_missing.py` bütün alət çağırışlarını `missing=True`-ya çevirir və
+7 mühərrikin (recon/vuln/content/ferox/param_enum/api_enum/deep_enum) crash
+etmədən `res.warn` verdiyini, uydurma tapıntı yaratmadığını təsdiqləyir.
+`ReconEngine.__init__`-də `self.rate` çatışmazlığı (real wiring buqu) da bu
+testlə aşkarlandı və düzəldildi.
 
 ### 3.3 Konfiqurasiya qeydi
 
@@ -91,7 +95,9 @@ idarə olunur; proqram qaydası (`program_rules.forbidden`) onlardan üstündür
 
 ## 4. Nəticə
 
-- Əsas cədvəldəki 10 sahənin **10-u PASS** (Chaining Faza 3 ilə bağlandı).
-- Əlavə 12 acceptance sahəsindən **11-i PASS**, **1-i PARTIAL**
-  ("Tool missing" dürüst raportu — mexanizm var, avtomatik testi yoxdur).
+- Əsas cədvəldəki sahələrin **hamısı PASS** (Chaining Faza 3 ilə bağlandı).
+- Əlavə 12 acceptance sahəsinin **12-si də PASS** ("Tool missing" dürüst
+  raportu Faza 4.2-də avtomatik test ilə təsdiqləndi).
+- Yeganə açıq məhdudiyyət: OS səviyyəli per-request sandbox tələb edən tam
+  şəbəkə izolyasiyası (§3.1) — sənədləşdirilmiş, gizlədilməyib.
 - Heç bir PASS sətri test olmadan verilməmişdir.

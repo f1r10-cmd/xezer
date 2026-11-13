@@ -26,6 +26,21 @@ class ReconEngine:
         self.guardian = ctx.guardian
         self.max_subs = int(ctx.limits.max_subdomains_per_target)
         self.max_alive = 200
+        self.rate = ctx.rate
+        #: Dürüst raport: hansı alətin yoxluğu barədə artıq xəbərdarlıq verilib.
+        self._warned: set[str] = set()
+
+    def _warn_missing(self, res: EngineResult, tool: str, note: str = "") -> None:
+        """Alət binari-si yoxdursa BİR DƏFƏ dürüst `res.warn` verir.
+
+        Uydurma nəticə istehsal OLUNMUR; sadəcə mərhələnin məhdud qaldığı
+        açıq şəkildə bildirilir (`docs/SECURITY_VERIFICATION.md`).
+        """
+        if tool in self._warned:
+            return
+        self._warned.add(tool)
+        res.warn(f"{tool} tapılmadı — recon məhdud"
+                 + (f" ({note})" if note else ""))
 
     async def run(self, domain: str, subdomains=None) -> EngineResult:
         res = EngineResult(stage=self.name)
@@ -61,7 +76,7 @@ class ReconEngine:
             return res
         print(f"[+] {len(subs)} host recon boru xəttinə daxil oldu")
 
-        alive = await self._httpx(subs)
+        alive = await self._httpx(subs, res)
         res.hosts = len(alive)
         await self._naabu(alive, res)
         await self._crawl(alive, res)
@@ -75,25 +90,25 @@ class ReconEngine:
             return True
         return False
 
-    async def _httpx(self, subdomains: list[str]) -> list[dict]:
+    async def _httpx(self, subdomains: list[str], res: EngineResult) -> list[dict]:
         inp = "\n".join(subdomains)
         # Faza 3.6: ilk təmas — random UA + təmkinli rate (WAF hələ bilinmir).
         plan = self.ctx.stealth.plan(
             self.rate * 10, base_concurrency=50, phase="httpx")
-        res = await run_process(
+        res_proc = await run_process(
             ["httpx", "-json", "-silent", "-tech-detect", "-title",
              "-cdn", "-status-code", "-no-color", "-random-agent",
              "-rate-limit", str(plan.rate_arg())],
             stdin=inp.encode(), timeout=600)
         alive: list[dict] = []
-        if res.missing:
-            print("[-] httpx tapılmadı")
+        if res_proc.missing:
+            self._warn_missing(res, "httpx", "canlı host aşkarlanmadı")
             return alive
-        if res.timed_out:
-            print("[-] httpx timeout")
+        if res_proc.timed_out:
+            res.warn("httpx timeout")
             return alive
 
-        for line in res.stdout.decode(errors="ignore").splitlines():
+        for line in res_proc.stdout.decode(errors="ignore").splitlines():
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
@@ -141,6 +156,9 @@ class ReconEngine:
             if not self.cfg.in_scope(target):
                 target = h["host"]
             ports = await self._naabu_scan(target, rate)
+            if ports is None:            # naabu yoxdur → dürüst xəbərdarlıq
+                self._warn_missing(res, "naabu", "port taraması atlandı")
+                break
             if ports:
                 db.insert_finding(
                     h["id"], "recon", "info",
@@ -152,12 +170,15 @@ class ReconEngine:
                 res.findings += 1
 
     @staticmethod
-    async def _naabu_scan(target: str, rate: int = 30) -> list[str]:
+    async def _naabu_scan(target: str, rate: int = 30) -> list[str] | None:
+        """Açıq portları qaytarır; alət yoxdursa `None` (boş siyahıdan fərqli)."""
         r = await run_process(
             ["naabu", "-host", target, "-top-ports", "100",
              "-rate", str(max(1, int(rate))), "-silent",
              "-json", "-no-color"], timeout=180)
-        if r.missing or r.timed_out:
+        if r.missing:
+            return None
+        if r.timed_out:
             return []
         ports: set[str] = set()
         for line in r.stdout.decode(errors="ignore").splitlines():
@@ -178,7 +199,10 @@ class ReconEngine:
                 ["katana", "-u", url, "-d", "3", "-js-crawl", "-silent",
                  "-no-color", "-fs", "rdn",
                  "-H", f"User-Agent: {ua_for(h['host'])}"], timeout=300)
-            if r.missing or r.timed_out:
+            if r.missing:
+                self._warn_missing(res, "katana", "crawl atlandı")
+                continue
+            if r.timed_out:
                 continue
             n = 0
             for line in r.stdout.decode(errors="ignore").splitlines():
@@ -199,7 +223,10 @@ class ReconEngine:
 
     async def _gau(self, domain: str, res: EngineResult):
         r = await run_process(["gau", domain, "--threads", "5"], timeout=180)
-        if r.missing or r.timed_out:
+        if r.missing:
+            self._warn_missing(res, "gau", "arxiv toplama atlandı")
+            return
+        if r.timed_out:
             return
         host_map = {h["subdomain"]: h["id"] for h in db.alive_hosts(self.ctx.scan_id)}
         n = 0

@@ -184,6 +184,8 @@ class TestProcessKill:
         rc = await asyncio.wait_for(proc.wait(), 5)
         assert rc != 0   # signal ilə öldürülüb
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX proses qrupu tələb edir (Windows-də yoxdur)")
     async def test_group_kill_terminates_children(self, tmp_path):
         """Bütöv proses qrupu — uşaq proses də dayanmalıdır."""
         marker = tmp_path / "child_alive.txt"

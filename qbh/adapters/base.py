@@ -104,14 +104,20 @@ def kill_process_group(proc: asyncio.subprocess.Process,
     """
     if sig is None:
         sig = getattr(signal, "SIGKILL", signal.SIGTERM)
-    try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError, OSError):
+    # Windows-da proses qrupları (`os.getpgid`/`os.killpg`) YOXDUR → dürüst
+    # şəkildə tək prosesə düşülür (AttributeError atılmır).
+    getpgid = getattr(os, "getpgid", None)
+    killpg = getattr(os, "killpg", None)
+    if getpgid is not None and killpg is not None:
         try:
-            proc.kill()
-        except (ProcessLookupError, OSError):
+            killpg(getpgid(proc.pid), sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
 
 
 async def run_process(cmd: list[str], *, stdin: bytes | None = None,

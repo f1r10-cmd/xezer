@@ -46,7 +46,7 @@ jobs:
       - name: Byte-compile (import/syntax gate)
         run: python -m compileall -q qbh main.py
       - name: Pytest with coverage
-        run: python -m pytest --cov=qbh --cov-report=term-missing
+        run: python -m pytest --cov=qbh --cov-report=term-missing --cov-fail-under=70
 
   secret-scan:
     name: Secret scanning (gitleaks)

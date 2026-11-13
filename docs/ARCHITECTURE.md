@@ -70,7 +70,7 @@ qbh-xazar/
 │   ├── engines/                # bütün mühərriklər
 │   ├── adapters/base.py        # shell-siz subprocess icrası
 │   └── report/                 # generator + HackerOne exporters
-├── tests/                      # pytest dəsti (550 test)
+├── tests/                      # pytest dəsti (562 test)
 └── docs/
 ```
 

@@ -3,6 +3,51 @@
 Bu sənəd audit, hardening və offensive genişləndirmə işləri zamanı edilmiş
 əhəmiyyətli arxitektura və davranış dəyişikliklərini qeyd edir.
 
+## [3.0.1] — Faza 4: bitirmə və cilalama (feature-complete)
+
+v3.0-ın funksional imkanları genişləndirilmədi — mövcud kod real bug bounty
+axınında uçdan-uca işləyəcək səviyyəyə gətirildi. **Yeni xarici imkan yoxdur**;
+sənəd/kod uyğunluğu, dürüst raportlaşdırma və zəncir həyat dövrünün bağlanması
+əsas işdir.
+
+### 4.1 Sənəd unifikasiyası
+
+- Bütün sənədlər faktiki v3.0 davranışına uyğunlaşdırıldı; köhnə "evasion
+  qadağandır" və oxşar bayat ifadələr təmizləndi.
+
+### 4.2 "Tool missing" dürüst raportlaşdırma
+
+- Çatışmayan alət artıq uydurma tapıntı yaratmır — aid olduğu mərhələ `skipped`
+  kimi qeyd olunur və hesabatda **dürüst** göstərilir. Recon rate konfiqdən
+  düzgün bağlanır.
+
+### 4.3 Uçdan-uca inteqrasiya testi
+
+- `tests/test_e2e_hunt.py` + `conftest.vuln_app` — loopback "zəiflikli tətbiq"
+  üzərində `--mode hunt` tam dövrəti (recon→…→hesabat). Heç bir xarici trafik yox.
+- `wafdetect` şəbəkə xətasında (`ClientError`/`OSError`) mərhələni "failed"
+  etmək yerinə dürüst `warn` verir.
+
+### 4.4 Zəncir keyfiyyəti — tapıntı həyat dövrünün bağlanması
+
+- Hesabat (H1 ixracı daxil) yazıldıqdan SONRA təsdiqlənmiş tapıntılar
+  `reported` işarələnir: `candidate → confirmed → reported` tamamlanır.
+- Mühərriklər yekunlaşmış (`confirmed`/`reported`) hədəfləri **YENİDƏN skan
+  etmir** — `docs/STEALTH.md` prinsipi indi `bypass` mühərrikində tətbiq olunur.
+- **Bug:** `bypass._record` `insert_finding` çağırışında `scan_id` ötürmürdü →
+  tapıntılar `LEGACY_SCAN_ID (0)` altına düşür və cari skanda görünmürdü.
+  Düzəldildi və regressiya testi ilə qorundu.
+
+### 4.5 CI və sənəd
+
+- CI `--cov-fail-under=70` (coverage floor); cari coverage **77%**.
+- README-yə "Məlum məhdudiyyətlər" bölməsi; TESTING.md sayları yeniləndi.
+
+### Versiya və baza
+
+- `qbh.__version__` → `3.0.1`; `SCHEMA_VERSION` `6` olaraq qalır.
+- Test dəsti **562 test** (561 keçir, 1 POSIX-only skip).
+
 ## [3.0] — Faza 3: secret vault, takeover, real zəncir, hunter, stealth
 
 Faza 2-nin offensive əsası üzərində qurulub. Bütün yeni imkanlar **eyni

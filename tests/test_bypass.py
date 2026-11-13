@@ -107,10 +107,28 @@ class TestBypassEngine:
         db.insert_url(hid, url, "ferox")
         res = await BypassEngine(_ctx(make_ctx)).run([url])
         assert res.findings >= 1
-        confirmed = [dict(r) for r in db.findings_by_status("confirmed")]
+        confirmed = [dict(r) for r in db.findings_by_status("confirmed", scan_id=1)]
         assert any(f["module"] == "bypass" for f in confirmed)
         fid = confirmed[0]["id"]
         assert db.evidence_for(fid)  # sübut əlavə olundu
+
+    async def test_settled_target_not_rescanned(self, tmp_db, make_ctx,
+                                                bypass_server):
+        """Faza 4.4: təsdiqlənmiş endpoint İKİNCİ dəfə skan EDİLMİR (reuse)."""
+        from qbh.engines.bypass import BypassEngine
+
+        url = f"{bypass_server}/admin"
+        hid = db.upsert_host("127.0.0.1", 1, status_code=200)
+        db.insert_url(hid, url, "ferox")
+        first = await BypassEngine(_ctx(make_ctx)).run([url])
+        assert first.findings >= 1
+        assert url in db.settled_targets("bypass", 1)
+        # İkinci cəhd → hədəf artıq yekunlaşıb, yenidən sınanmır.
+        second = await BypassEngine(_ctx(make_ctx)).run([url])
+        assert second.skipped is True
+        assert second.findings == 0
+        # Təkrar skan yeni tapıntı yaratmır (dedup qorunur).
+        assert len(db.findings_by_status("confirmed", scan_id=1)) == 1
 
     async def test_failed_bypass_no_finding(self, tmp_db, make_ctx,
                                             local_server):
@@ -121,7 +139,7 @@ class TestBypassEngine:
         db.insert_url(hid, url, "ferox")
         res = await BypassEngine(_ctx(make_ctx)).run([url])
         assert res.findings == 0
-        assert db.findings_by_status("confirmed") == []
+        assert db.findings_by_status("confirmed", scan_id=1) == []
 
     async def test_out_of_scope_url_skipped(self, tmp_db, make_ctx):
         from qbh.engines.bypass import BypassEngine

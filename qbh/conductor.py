@@ -313,7 +313,7 @@ class Conductor:
     # ---------------- yekun ----------------
     def generate_report(self) -> str | None:
         try:
-            return generator.generate(
+            path = generator.generate(
                 severity_min=self.args.severity,
                 stages=self.stages,
                 meta={
@@ -334,6 +334,17 @@ class Conductor:
             print("[!] Hesabat yaradıla bilmədi:")
             traceback.print_exc()
             return None
+        # Faza 4.4: hesabat (və H1 ixracı) yazıldıqdan SONRA təsdiqlənmiş
+        # tapıntılar `reported` işarələnir. Beləcə eyni tapıntı sonrakı
+        # emalda yenidən "yeni/təsdiqlənmiş" kimi təkrarlanmır (terminal status).
+        if path and self.scan_id is not None:
+            try:
+                n = db.mark_reported(self.scan_id)
+                if n:
+                    print(f"[✓] {n} təsdiqlənmiş tapıntı `reported` işarələndi")
+            except Exception as exc:  # noqa: BLE001 - status yenilənməsə hesabat qalır
+                print(f"[!] Tapıntı statusu `reported` edilə bilmədi: {exc}")
+        return path
 
     @property
     def failed_stages(self) -> list[StageResult]:

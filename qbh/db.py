@@ -478,6 +478,38 @@ def findings_by_status(status: str, scan_id=None):
         (normalize_status(status), sid)).fetchall()
 
 
+def mark_reported(scan_id=None) -> int:
+    """Hesabatda göstərilmiş `confirmed` tapıntıları `reported`-a keçirir.
+
+    Hesabat (H1 ixracı daxil olmaqla) yazıldıqdan SONRA çağırılır. Beləliklə
+    həmin tapıntı sonrakı mərhələlərdə/təkrar emalda "yeni təsdiqlənmiş" kimi
+    yenidən işlənmir — `reported` terminal statusdur.
+    Qaytarır: dəyişdirilmiş sətir sayı.
+    """
+    sid = effective_scan_id(scan_id)
+    conn = get_db()
+    with conn:
+        cur = conn.execute(
+            "UPDATE findings SET status='reported' WHERE scan_id=? "
+            "AND status='confirmed'", (sid,))
+    return cur.rowcount or 0
+
+
+def settled_targets(module: str, scan_id=None) -> set[str]:
+    """`module` üzrə yekunlaşmış (confirmed/reported) tapıntıların hədəfləri.
+
+    Mühərriklər bu endpoint-ləri YENİDƏN skan etmir (səs-küyün azaldılması:
+    'təsdiqlənmiş tapıntı heç vaxt yenidən skan edilmir'). Hədəf sübut
+    cədvəlində `data`/`target=<url>` kimi qeyd olunur.
+    """
+    sid = effective_scan_id(scan_id)
+    rows = get_db().execute(
+        "SELECT e.content FROM evidence e JOIN findings f ON f.id=e.finding_id "
+        "WHERE f.scan_id=? AND f.module=? AND f.status IN ('confirmed','reported') "
+        "AND e.kind='data' AND e.content LIKE 'target=%'", (sid, module)).fetchall()
+    return {r["content"][len("target="):] for r in rows}
+
+
 def upsert_validated(finding_id: int, passed: bool | None, note: str = ""):
     conn = get_db()
     with conn:

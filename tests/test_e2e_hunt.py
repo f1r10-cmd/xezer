@@ -149,26 +149,28 @@ class TestHuntEndToEnd:
         assert status in ("completed", "partial")
 
         findings = _findings(scan_id)
-        confirmed = [f for f in findings if f["status"] == "confirmed"]
+        reported = [f for f in findings if f["status"] == "reported"]
         candidates = [f for f in findings if f["status"] == "candidate"]
 
-        # --- həyat dövrü: həm candidate, həm confirmed sətir mövcuddur ---
+        # --- həyat dövrü: candidate qaldı, təsdiqlənənlər `reported` oldu ---
+        # Faza 4.4: hesabat (H1 ixracı daxil) yazıldıqdan sonra `confirmed`
+        # tapıntılar terminal `reported` statusuna keçir.
         assert candidates, f"kandidat tapıntı yoxdur: {findings}"
-        assert confirmed, f"təsdiqlənmiş tapıntı YOXDUR: {findings}"
+        assert reported, f"`reported` tapıntı YOXDUR (lifecycle bağlanmadı): {findings}"
 
-        # --- 401/403 bypass texnikası `/admin`-i açdı → confirmed ---
-        bypass = [f for f in confirmed if f["module"] == "bypass"]
-        assert bypass, f"bypass tapıntısı təsdiqlənmədi: {findings}"
+        # --- 401/403 bypass texnikası `/admin`-i açdı → confirmed → reported ---
+        bypass = [f for f in reported if f["module"] == "bypass"]
+        assert bypass, f"bypass tapıntısı `reported` olmadı: {findings}"
         assert any("admin" in (f["title"] or "").lower()
                    or "admin" in (f["evidence"] or "").lower() for f in bypass)
 
-        # --- JS faylındakı yalançı secret aşkarlandı (candidate) ---
+        # --- JS faylındakı yalançı secret aşkarlandı (candidate qalır) ---
         js = [f for f in candidates if f["module"] == "jsanalysis"]
         assert js, f"JS secret tapıntısı yoxdur: {findings}"
 
-        # --- secret replay: JWT qüvvədədir → confirmed ---
-        replay = [f for f in confirmed if f["module"] == "secret_replay"]
-        assert replay, f"secret replay təsdiqlənmədi: {findings}"
+        # --- secret replay: JWT qüvvədədir → confirmed → reported ---
+        replay = [f for f in reported if f["module"] == "secret_replay"]
+        assert replay, f"secret replay `reported` olmadı: {findings}"
 
         # --- hesabat: MD + JSON + HackerOne ---
         md, js_files, h1_files = _reports(tmp_path)

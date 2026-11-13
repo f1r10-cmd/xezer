@@ -497,6 +497,37 @@ class TestGenerateReport:
         assert c.generate_report() is None
         assert "Hesabat yaradıla bilmədi" in capsys.readouterr().out
 
+    def test_marks_confirmed_reported_after_write(self, tmp_db, make_conductor,
+                                                  monkeypatch):
+        """Faza 4.4: hesabat yazıldıqdan sonra confirmed → reported keçidi."""
+        c = make_conductor()
+        c.scan_id = 1
+        hid = db.upsert_host("127.0.0.1", 1, status_code=200)
+        fid = db.insert_finding(hid, "bypass", "high", "Bypass",
+                                status="confirmed", scan_id=1)
+        monkeypatch.setattr(conductor_mod.generator, "generate",
+                            lambda **kw: "/tmp/report.md")
+        assert c.generate_report() == "/tmp/report.md"
+        assert db.findings_by_status("confirmed", scan_id=1) == []
+        reported = db.findings_by_status("reported", scan_id=1)
+        assert reported and reported[0]["id"] == fid
+
+    def test_generator_failure_leaves_status_untouched(self, tmp_db,
+                                                       make_conductor, monkeypatch):
+        c = make_conductor()
+        c.scan_id = 1
+        hid = db.upsert_host("127.0.0.1", 1, status_code=200)
+        db.insert_finding(hid, "bypass", "high", "B",
+                          status="confirmed", scan_id=1)
+
+        def boom(**kw):
+            raise RuntimeError("disk dolub")
+
+        monkeypatch.setattr(conductor_mod.generator, "generate", boom)
+        assert c.generate_report() is None
+        # Hesabat yazılmadısa status DƏYİŞMƏMƏLİDİR (uydurma `reported` yox).
+        assert db.findings_by_status("confirmed", scan_id=1)
+
 
 class TestSummary:
     def test_failed_stages_property(self, make_conductor):

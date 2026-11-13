@@ -54,6 +54,17 @@ class BypassEngine:
         candidates = urls if urls is not None else self._db_candidates()
         if not candidates:
             return res.skip("bypass üçün maraqlı endpoint tapılmadı")
+        # Faza 4.4: artıq təsdiqlənmiş (confirmed/reported) endpoint YENİDƏN
+        # sınanmır — 'təsdiqlənmiş tapıntı heç vaxt yenidən skan edilmir'.
+        settled = db.settled_targets(self.name, self.ctx.scan_id)
+        if settled:
+            fresh = [u for u in candidates if u not in settled]
+            if len(fresh) != len(candidates):
+                print(f"   [♻] {len(candidates) - len(fresh)} endpoint artıq "
+                      f"təsdiqlənib — yenidən sınanmır (reuse)")
+            candidates = fresh
+        if not candidates:
+            return res.skip("bütün namizədlər artıq təsdiqlənib — yenidən skan yoxdur")
         print(f"[═══ BYPASS ENGINE ═══] {len(candidates)} endpoint")
 
         sem = asyncio.Semaphore(CONCURRENCY)
@@ -130,11 +141,15 @@ class BypassEngine:
             row["host_id"], "bypass", "high", title, desc,
             evidence=f"{attempt.url} → {resp.status}", curl_repro=curl,
             confidence=BYPASS_OK, status="confirmed",
-            source=f"bypass:{attempt.label}")
+            source=f"bypass:{attempt.label}", scan_id=self.ctx.scan_id)
         if fid > 0:
             db.add_evidence(fid, "http_response",
                             f"baseline={base_status} bypass={resp.status} "
                             f"method={attempt.method} {excerpt}",
+                            scan_id=self.ctx.scan_id)
+            # Faza 4.4: hədəfi sübutda qeyd et → sonrakı mərhələ bu endpoint-i
+            # yenidən skan etməsin (`db.settled_targets`).
+            db.add_evidence(fid, "data", f"target={url}",
                             scan_id=self.ctx.scan_id)
         res.findings += 1
         print(f"   [🔓] {row['subdomain']}: {attempt.label} → "

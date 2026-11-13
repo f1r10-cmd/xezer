@@ -85,9 +85,11 @@ class SQLiEngine(OffensiveEngine):
         else:  # ghauri
             cmd = ["ghauri", "-u", row["url"], "--batch", "--level", level,
                    "--confirm", "--dbs"]
-        from ..adapters.base import run_process
-
-        proc = await run_process(cmd, timeout=self.timeout)
+        proc = await self.ctx.egress.run(cmd, targets=[row["url"]],
+                                         timeout=self.timeout)
+        if proc.blocked:
+            res.warn(f"{tool}: egress qapısı hədəfi bloklandı")
+            return
         if proc.missing:
             res.warn(f"{tool} tapılmadı")
             return

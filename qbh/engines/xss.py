@@ -108,11 +108,14 @@ class XSSEngine(OffensiveEngine):
 
     # ---------------------------------------------------------- dalfox
     async def _dalfox(self, row, res: EngineResult) -> None:
-        from ..adapters.base import run_process
-
         cmd = ["dalfox", "url", row["url"], "--no-spinner", "--silence",
                "--output", "/dev/stdout", "--only-poc", "r"]
-        proc = await run_process(cmd, timeout=self.timeout)
+        # Faza 1.2: TƏK egress qapısı (scope + fail-closed DNS pinning).
+        proc = await self.ctx.egress.run(cmd, targets=[row["url"]],
+                                         timeout=self.timeout)
+        if proc.blocked:
+            res.warn("dalfox: egress qapısı hədəfi bloklandı")
+            return
         if proc.missing:
             res.warn("dalfox tapılmadı")
             return

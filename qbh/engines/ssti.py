@@ -112,10 +112,13 @@ class SSTIEngine(OffensiveEngine):
         return r.text
 
     async def _sstimap(self, row, res: EngineResult) -> None:
-        from ..adapters.base import run_process
-
         cmd = ["sstimap", "-u", row["url"], "--level", "2", "--no-color"]
-        proc = await run_process(cmd, timeout=self.timeout)
+        # Faza 1.2: TƏK egress qapısı (scope + fail-closed DNS pinning).
+        proc = await self.ctx.egress.run(cmd, targets=[row["url"]],
+                                         timeout=self.timeout)
+        if proc.blocked:
+            res.warn("sstimap: egress qapısı hədəfi bloklandı")
+            return
         if proc.missing:
             return
         out = proc.stdout.decode(errors="ignore")

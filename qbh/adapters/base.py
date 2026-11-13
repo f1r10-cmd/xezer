@@ -9,9 +9,51 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import tempfile
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any, Sequence
+
+#: Cari asyncio kontekstində aktiv egress qapısı (Faza 1.2).
+#:
+#: `EgressController.activate()` bunu qurur; `run_process` hər alt-proses
+#: başlatmazdan ƏVVƏL qapıdan keçir. Beləliklə heç bir mühərrik (dnstwist,
+#: gowitness, semgrep ...) egress yoxlamasını keçə bilməz — qapı proses
+#: başlatma nöqtəsinin ÖZÜNDƏ tətbiq olunur.
+_process_guard: ContextVar[Any] = ContextVar("qbh_process_guard", default=None)
+
+#: Alt-proses arqumentlərində URL-ləri (derived target) aşkarlayır.
+_URL_TOKEN_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.\-]*://|//)")
+
+
+def current_process_guard() -> Any:
+    """Cari egress qapısını qaytarır (yoxdursa `None`)."""
+    return _process_guard.get()
+
+
+def set_process_guard(guard: Any):
+    """Egress qapısını aktivləşdirir və geri-qaytarma token-i verir."""
+    return _process_guard.set(guard)
+
+
+def reset_process_guard(token) -> None:
+    """`set_process_guard` nəticəsini geri qaytarır."""
+    _process_guard.reset(token)
+
+
+def derive_targets(cmd: Sequence[str]) -> list[str]:
+    """Command arqumentlərindən URL formalı hədəfləri çıxarır.
+
+    Yalnız AÇIQ sxemli (`scheme://`, `//`) token-lər — host adları və ya
+    fayl yolları səhvən hədəf sayılmır (JWT token-ləri, wordlist yolları ...).
+    """
+    out: list[str] = []
+    for arg in cmd:
+        if isinstance(arg, str) and _URL_TOKEN_RE.match(arg.strip()):
+            out.append(arg.strip())
+    return out
 
 
 def limited_wordlist(path: str, cap: int) -> tuple[str, str | None]:
@@ -41,20 +83,27 @@ class ProcResult:
     stderr: bytes = b""
     timed_out: bool = False
     missing: bool = False
+    blocked: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.timed_out and not self.missing
+        return (self.returncode == 0 and not self.timed_out
+                and not self.missing and not self.blocked)
 
 
 def kill_process_group(proc: asyncio.subprocess.Process,
-                       sig: int = signal.SIGKILL) -> None:
+                       sig: int | None = None) -> None:
     """Prosesi və BÜTÖV proses qrupunu öldürür (Faza 0.2).
 
     `start_new_session=True` ilə başladılmış alt-proseslər üçün `killpg`
     istifadə olunur ki, alətin özü açdığı uşaq proseslər də dayansın.
     Qrup mövcud deyilsə sadəcə `proc.kill()`.
+
+    Default siqnal RUNTIME-da hesablanır (`SIGKILL` Windows-da yoxdur) —
+    import zamanı AttributeError-un qarşısı alınır.
     """
+    if sig is None:
+        sig = getattr(signal, "SIGKILL", signal.SIGTERM)
     try:
         pgid = os.getpgid(proc.pid)
         os.killpg(pgid, sig)
@@ -67,13 +116,36 @@ def kill_process_group(proc: asyncio.subprocess.Process,
 
 async def run_process(cmd: list[str], *, stdin: bytes | None = None,
                       timeout: float = 600,
-                      cancel_event: "asyncio.Event | None" = None) -> ProcResult:
+                      cancel_event: "asyncio.Event | None" = None,
+                      env: dict | None = None,
+                      targets: Sequence[str] | None = None) -> ProcResult:
     """Təhlükəsiz async subprocess. Shell yoxdur; cancel/timeout → proses qrupu öldürülür.
 
     `cancel_event` verildikdə proses ayrı monitor vasitəsilə izlənir və
     event set olan kimi bütöv proses qrupu SIGKILL edilir (Guardian/Conductor
     halt qərarı).
+
+    Egress qapısı (Faza 1.2): cari kontekstdə `EgressController.activate()`
+    ilə qapı aktivdirsə, alt-proses başladılmazdan ƏVVƏL həm açıq şəkildə
+    verilən `targets`, həm də command içindəki URL-lər scope + DNS pinning
+    yoxlamasından keçir. Fail-closed: scope xarici və ya həll olunmayan
+    hədəf varsa proses HEÇ BAŞLADILMIR (`ProcResult(blocked=True)`).
     """
+    guard = _process_guard.get()
+    extra_env: dict | None = None
+    if guard is not None:
+        blocked, extra_env = await guard.prepare_process(cmd, targets)
+        if blocked is not None:
+            return blocked
+
+    child_env: dict | None = None
+    if env is not None or extra_env is not None:
+        child_env = dict(os.environ)
+        if env:
+            child_env.update(env)
+        if extra_env:
+            child_env.update(extra_env)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -81,6 +153,7 @@ async def run_process(cmd: list[str], *, stdin: bytes | None = None,
             else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=child_env,
             start_new_session=True)
     except FileNotFoundError:
         return ProcResult(-1, missing=True)

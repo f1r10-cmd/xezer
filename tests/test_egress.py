@@ -204,6 +204,88 @@ class TestProcessKill:
         assert not marker.exists()
 
 
+# ------------------------------------------------ MƏCBURİ qapı (Faza 1.2)
+class TestProcessGuard:
+    """Sübut: `run_process` ÖZÜ qapıdan keçir — mühərrik bypass edə bilməz.
+
+    Tarixi qüsur: yalnız `egress.run()` çağıran mühərriklər qorunurdu;
+    `run_process`-i birbaşa çağıran mühərrik (dnstwist, gowitness, semgrep)
+    scope yoxlamasını tamamilə keçirdi.
+    """
+
+    async def test_activated_guard_blocks_out_of_scope_url(self, load_config,
+                                                           tmp_path):
+        auth = _auth(load_config)
+        ctl = EgressController(auth, resolver=lambda h: ["10.0.0.1"],
+                               sandbox="off")
+        marker = tmp_path / "ran.txt"
+        code = (f"import pathlib;"
+                f"pathlib.Path({str(marker)!r}).write_text('x')")
+        with ctl.activate():
+            res = await run_process(
+                [sys.executable, "-c", code, "https://evil.test/x"],
+                timeout=10)
+        assert res.blocked is True
+        assert res.ok is False
+        # Fail-closed: proses HEÇ BAŞLADILMADI (marker yazılmadı).
+        assert not marker.exists()
+        assert any(e["event"] == "egress_blocked" and e["reason"] == "scope"
+                   for e in ctl.audit)
+
+    async def test_activated_guard_dns_failure_is_fail_closed(self, load_config):
+        auth = _auth(load_config)
+        # DNS heç nə qaytarmır → hədəf rədd olunmalı (fail-closed).
+        ctl = EgressController(auth, resolver=lambda h: [], sandbox="off")
+        with ctl.activate():
+            res = await run_process(
+                [sys.executable, "-c", "print(1)",
+                 "https://app.example.com/x"], timeout=10)
+        assert res.blocked is True
+        assert any(e["event"] == "egress_blocked" and e["reason"] == "dns"
+                   for e in ctl.audit)
+
+    async def test_guard_reset_after_context_exit(self, load_config):
+        auth = _auth(load_config)
+        ctl = EgressController(auth, resolver=lambda h: ["10.0.0.1"],
+                               sandbox="off")
+        with ctl.activate():
+            pass
+        # Qapı bağlandıqdan sonra URL yenidən yoxlanılmır (qapı sızmasın).
+        res = await run_process(
+            [sys.executable, "-c", "print('ok')", "https://evil.test/x"],
+            timeout=10)
+        assert res.blocked is False
+        assert res.ok is True
+
+    async def test_egress_run_in_scope_loopback(self, load_config):
+        auth = _auth(load_config)
+        ctl = EgressController(auth, resolver=lambda h: ["127.0.0.1"],
+                               sandbox="off")
+        res = await ctl.run([sys.executable, "-c", "print('hi')"],
+                            targets=["http://app.example.com/"], timeout=10)
+        assert res.ok is True
+        assert res.stdout.strip() == b"hi"
+
+    async def test_egress_run_blocks_out_of_scope(self, load_config):
+        auth = _auth(load_config)
+        ctl = EgressController(auth, resolver=lambda h: ["10.0.0.1"],
+                               sandbox="off")
+        res = await ctl.run([sys.executable, "-c", "print('nope')"],
+                            targets=["https://evil.test/"], timeout=10)
+        assert res.blocked is True
+        assert res.ok is False
+
+    def test_netfilter_rules_default_drop(self):
+        from qbh.egress import _netfilter_rules
+
+        rules = _netfilter_rules(["10.0.0.1", "2001:db8::1"])
+        assert ":OUTPUT DROP [0:0]" in rules
+        assert "-A OUTPUT -4 -d 10.0.0.1 -j ACCEPT" in rules
+        assert "-A OUTPUT -6 -d 2001:db8::1 -j ACCEPT" in rules
+        assert "-A OUTPUT -o lo -j ACCEPT" in rules
+        assert rules.rstrip().endswith("COMMIT")
+
+
 # --------------------------------------------------- API sərhədi (fail-closed)
 class TestFailClosed:
     def test_empty_scope_rejected(self, load_config):

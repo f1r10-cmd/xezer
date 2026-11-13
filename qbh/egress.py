@@ -1,44 +1,63 @@
-"""Subprocess egress idarəsi — Faza 0.2 (KRİTİK).
+"""Subprocess egress idarəsi — Faza 0.2 + Faza 1.2 (KRİTİK).
 
 **Problem.** Native HTTP mühərrikləri `HttpPolicy`-dən keçir, lakin subprocess
-alətləri (nuclei, feroxbuster, ffuf, schemathesis, katana, kiterunner ...) öz
-şəbəkə trafikini özləri idarə edir. Ona görə də alt-prosesə verilən hədəflərin
-scope-a uyğun olduğunu ƏVVƏLCƏDƏN təsdiqləmək və prosesi lazım gəldikdə bütöv
-proses qrupu ilə öldürmək vacibdir.
+alətləri (nuclei, feroxbuster, ffuf, schemathesis, katana, kiterunner, dnstwist,
+gowitness ...) öz şəbəkə trafikini özləri idarə edir. Ona görə də alt-prosesə
+verilən hədəflərin scope-a uyğun olduğunu ƏVVƏLCƏDƏN təsdiqləmək və prosesi
+lazım gəldikdə bütöv proses qrupu ilə öldürmək vacibdir.
 
-**Tək giriş nöqtəsi.**
+**Tək məcburi giriş nöqtəsi (Faza 1.2).**
 
-    tset = await egress.authorize_process_targets(targets)
+    proc = await ctx.egress.run(cmd, targets=[...])   # mühərriklər üçün
 
-`tset` YALNIZ scope-daxili hostları/URL-ləri ehtiva edir; hər host üçün DNS
-IP-ləri həll olunub və `ctx.resolved_ips`-ə audit üçün yazılır (DNS pinning).
-Scope xarici hədəflər RƏDD edilir və `tset.rejected`-də qeyd olunur — onlar
-HEÇ VAXT alt-prosesə verilmir.
+Əlavə olaraq qapı proses başlatma nöqtəsinin ÖZÜNDƏ — `adapters.base.run_process`
+daxilində — ikinci qat kimi tətbiq olunur:
 
-**Ləğv/halt.** Bütün alt-proseslər `adapters.base.run_process` vasitəsilə
-işə düşür; o, `start_new_session=True` ilə ayrı proses qrupu yaradır və
-timeout/ləğv (və ya `cancel_event`) zamanı qrupu SIGKILL edir.
+    with egress.activate():          # Conductor skan boyu bunu edir
+        await run_process(cmd)       # açıq targets + cmd içindəki URL-lər yoxlanır
 
-**Dürüst məhdudiyyət (docs/STEALTH.md).** Bu, tam per-request egress nəzarəti
-DEYİL. Alt-proses öz DNS-ini yenidən həll edə və ya redirect izləyə bilər; tam
-nəzarət üçün OS səviyyəli sandbox (firejail / network namespace) tələb olunur
-ki, bu da opsional/konfiqurasiya edilə biləndir. Tətbiq olunan praqmatik
-sərhəd: (1) giriş hədəflərinin scope yoxlaması, (2) DNS pinning/audit,
-(3) ləğv/halt zamanı proses qrupunun SIGKILL edilməsi, (4) audit qeydi.
+Beləliklə HEÇ BİR mühərrik (dnstwist, gowitness, semgrep ...) egress yoxlamasını
+keçə bilmir: qapı həm `egress.run()`, həm də birbaşa `run_process()` çağırışında
+işləyir.
+
+**Fail-closed DNS pinning.** Hər icazəli host üçün IP-lər indi həll olunur və
+`ctx.resolved_ips`-ə audit üçün yazılır. Scope xarici hədəf YAXUD həll olunmayan
+(DNS uğursuz) hədəf varsa alt-proses HEÇ BAŞLADILMIR (`ProcResult(blocked=True)`)
+və hadisə audit jurnalına düşür.
+
+**OS səviyyəli sərhəd (opsional, Linux).** `QBH_EGRESS_SANDBOX=firejail` (və ya
+firejail avtomatik aşkarlanarsa) alt-proses `firejail --hosts-file=<pin>` ilə
+işə salınır: pin olunmuş host→IP cədvəli uşağa YALNIZ bu fayl vasitəsilə verilir
+(DNS pinning faktiki tətbiq olunur). `--netfilter` + `--net` verildikdə yalnız
+pin olunmuş IP-lərə çıxışa icazə verən nftables/iptables allowlist yazılır.
+firejail yoxdursa bu qat sakitcə atlanır və auditə `egress_sandbox_unavailable`
+yazılır (`docs/SECURITY_VERIFICATION.md`).
+
+**Dürüst məhdudiyyət (docs/STEALTH.md).** Sandbox aktiv olmadıqda bu, tam
+per-request egress nəzarəti DEYİL: alt-proses öz DNS-ini yenidən həll edə və ya
+redirect izləyə bilər. Tətbiq olunan praqmatik sərhəd: (1) giriş hədəflərinin
+scope + DNS yoxlaması (fail-closed), (2) DNS pinning/audit, (3) opsional firejail
+(DNS pin + IP allowlist), (4) ləğv/halt zamanı proses qrupunun SIGKILL edilməsi.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import shutil
 import socket
 import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
+from .adapters.base import (ProcResult, derive_targets, reset_process_guard,
+                            run_process, set_process_guard)
 from .scope import ScopeError, extract_host, normalize_host
 
 DEFAULT_TTL = 300.0          # DNS nəticəsinin keçərlilik müddəti (saniyə)
+DEFAULT_SANDBOX = "auto"     # auto | off | firejail
+SANDBOX_ENV = "QBH_EGRESS_SANDBOX"
 
 
 def system_resolver(host: str) -> list[str]:
@@ -104,13 +123,123 @@ class EgressController:
     def __init__(self, authorization, *, resolver: Callable[[str], list[str]] | None = None,
                  ttl: float = DEFAULT_TTL, clock: Callable[[], float] | None = None,
                  resolved_store: dict | None = None,
-                 audit: list | None = None):
+                 audit: list | None = None,
+                 sandbox: str | None = None):
         self.auth = authorization
         self._resolver = resolver or system_resolver
         self.ttl = float(ttl)
         self._clock = clock or time.monotonic
         self.resolved_store = resolved_store if resolved_store is not None else {}
         self.audit: list = audit if audit is not None else []
+        self.sandbox = sandbox
+        self._sandbox_warned = False
+
+    # -------------------------------------------------- aktiv qapı (Faza 1.2)
+    @contextlib.contextmanager
+    def activate(self):
+        """Bu controller-i cari kontekst üçün MƏCBURİ egress qapısı edir.
+
+        Aktiv olduqda `adapters.base.run_process` hər alt-prosesi bu qapıdan
+        keçirir — mühərrik `egress.run()` çağırmasa belə bypass mümkün deyil.
+        """
+        token = set_process_guard(self)
+        try:
+            yield self
+        finally:
+            reset_process_guard(token)
+
+    async def prepare_process(self, cmd: list[str],
+                              targets: Iterable[str] | None) -> tuple[ProcResult | None, dict | None]:
+        """`run_process` qapısı: (blok_nəticəsi|None, əlavə_env|None) qaytarır.
+
+        Açıq `targets` ilə command içindəki URL-lər birləşdirilir; heç biri
+        yoxdursa (lokal alət) qapı heç nə etmir. Scope xarici və ya DNS-i
+        həll olunmayan hədəf varsa proses bloklanır (fail-closed) + audit.
+        """
+        candidates: list[str] = []
+        for raw in list(targets or []):
+            if raw:
+                candidates.append(raw)
+        candidates.extend(derive_targets(cmd))
+        if not candidates:
+            return None, None
+        tset = await self.authorize_process_targets(candidates)
+        if tset.rejected:
+            denied = [u for u, _ in tset.rejected]
+            self.audit.append({"event": "egress_blocked", "reason": "scope",
+                               "targets": denied, "at": time.time()})
+            return ProcResult(-1, stderr=b"egress: out-of-scope target blocked",
+                              blocked=True), None
+        unresolved = [h for h in tset.hostnames if not tset.resolved.get(h)]
+        if unresolved:
+            self.audit.append({"event": "egress_blocked", "reason": "dns",
+                               "hosts": unresolved, "at": time.time()})
+            return ProcResult(-1, stderr=b"egress: DNS resolution failed (fail-closed)",
+                              blocked=True), None
+        return None, None
+
+    async def run(self, cmd: list[str], *, targets: Iterable[str] = (),
+                  stdin: bytes | None = None, timeout: float = 600,
+                  cancel_event: "asyncio.Event | None" = None) -> ProcResult:
+        """Mühərriklər üçün TƏK icazəli alt-proses başlatma nöqtəsi.
+
+        Qapını (scope + fail-closed DNS) tətbiq edir, mümkünsə firejail
+        sandbox-u (DNS pin + IP allowlist) ilə işə salır və audit yazır.
+        """
+        target_list = [t for t in targets if t]
+        prefix, cleanup = await self._sandbox_prefix(target_list)
+        real_cmd = list(prefix) + list(cmd) if prefix else list(cmd)
+        try:
+            with self.activate():
+                return await run_process(real_cmd, stdin=stdin, timeout=timeout,
+                                         cancel_event=cancel_event,
+                                         targets=target_list)
+        finally:
+            for path in cleanup:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    # ------------------------------------------------------ OS sandbox (opsional)
+    def _sandbox_mode(self) -> str:
+        mode = (self.sandbox or os.environ.get(SANDBOX_ENV)
+                or DEFAULT_SANDBOX).strip().lower()
+        if mode == "auto":
+            return "firejail" if shutil.which("firejail") else "off"
+        return mode if mode in ("off", "firejail") else "off"
+
+    async def _sandbox_prefix(self, targets: list[str]) -> tuple[list[str], list[str]]:
+        """Firejail prefiksini + müvəqqəti faylları hazırlayır (varsa)."""
+        mode = self._sandbox_mode()
+        if mode != "firejail":
+            return [], []
+        if not targets:
+            return [], []
+        if shutil.which("firejail") is None:
+            if not self._sandbox_warned:
+                self._sandbox_warned = True
+                self.audit.append({"event": "egress_sandbox_unavailable",
+                                   "sandbox": "firejail", "at": time.time()})
+            return [], []
+        tset = await self.authorize_process_targets(targets)
+        pinned = {h: tset.resolved.get(h, ()) for h in tset.hostnames}
+        if not any(pinned.values()):
+            return [], []
+        hosts_path = _write_temp("\n".join(
+            f"{ip} {host}" for host, ips in pinned.items() for ip in ips) + "\n")
+        cleanup = [hosts_path]
+        prefix = ["firejail", "--quiet", "--noprofile",
+                  f"--hosts-file={hosts_path}"]
+        iface = os.environ.get("QBH_EGRESS_IFACE", "").strip()
+        if iface:
+            nf_path = _write_temp(_netfilter_rules(tset.ips))
+            cleanup.append(nf_path)
+            prefix += [f"--net={iface}", f"--netfilter={nf_path}"]
+        self.audit.append({"event": "egress_sandbox", "sandbox": "firejail",
+                           "hosts": list(pinned), "ips": tset.ips,
+                           "netfilter": bool(iface), "at": time.time()})
+        return prefix, cleanup
 
     # ----------------------------------------------------------- əsas giriş
     async def authorize_process_targets(self, targets: Iterable[str]) -> ProcessTargetSet:
@@ -177,6 +306,31 @@ class EgressController:
                 "ips": tset.ips,
                 "at": time.time(),
             })
+
+
+def _write_temp(content: str) -> str:
+    """Məzmunu müvəqqəti fayla yazır və yolunu qaytarır (çağıran silir)."""
+    fd, path = tempfile.mkstemp(prefix="qbh_egress_", suffix=".conf")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return path
+
+
+def _netfilter_rules(ips: Iterable[str]) -> str:
+    """Yalnız pin olunmuş IP-lərə (və loopback-a) çıxışa icazə verən allowlist.
+
+    firejail `--netfilter=` faylı üçün iptables-restore sintaksisi.
+    Default politika DROP → scope xarici istənilən IP bağlanır.
+    """
+    lines = ["*filter", ":INPUT DROP [0:0]", ":FORWARD DROP [0:0]",
+             ":OUTPUT DROP [0:0]",
+             "-A OUTPUT -o lo -j ACCEPT",
+             "-A INPUT -i lo -j ACCEPT"]
+    for ip in ips:
+        fam = "-4" if ":" not in ip else "-6"
+        lines.append(f"-A OUTPUT {fam} -d {ip} -j ACCEPT")
+    lines.append("COMMIT")
+    return "\n".join(lines) + "\n"
 
 
 async def authorize_process_targets(authorization, targets: Iterable[str], *,

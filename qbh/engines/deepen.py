@@ -16,7 +16,6 @@ import os
 import urllib.parse
 
 from .. import db
-from ..adapters.base import run_process
 from ..results import EngineResult
 from ..scope import ScopeError, normalize_host
 
@@ -44,10 +43,15 @@ class BBOTEngine:
         if domain not in set(tset.hostnames):
             res.fail(f"egress: {domain} icazəli deyil")
             return res
-        proc = await run_process(
+        # Faza 1.2: alt-proses TƏK egress qapısından (scope + DNS pinning)
+        # keçir — birbaşa `run_process` bypass edilə bilməz.
+        proc = await self.ctx.egress.run(
             ["bbot", "-t", domain, "-f", "subdomain-enum", "-om", "json",
              "-o", "/dev/stdout", "-y", "--no-color"],
-            timeout=TIMEOUT)
+            targets=[domain], timeout=TIMEOUT)
+        if proc.blocked:
+            res.fail(f"egress: {domain} scope/RoE qapısı ilə bloklandı")
+            return res
         if proc.missing:
             res.warn("bbot tapılmadı — dərin kəşf atlandı")
             return res.skip("bbot mövcud deyil")
@@ -111,9 +115,12 @@ class WaymoreEngine:
         if domain not in set(tset.hostnames):
             res.fail(f"egress: {domain} icazəli deyil")
             return res
-        proc = await run_process(
+        proc = await self.ctx.egress.run(
             ["waymore", "-i", domain, "-mode", "U", "-n", "0"],
-            timeout=TIMEOUT)
+            targets=[domain], timeout=TIMEOUT)
+        if proc.blocked:
+            res.fail(f"egress: {domain} scope/RoE qapısı ilə bloklandı")
+            return res
         if proc.missing:
             res.warn("waymore tapılmadı — atlandı")
             return res.skip("waymore mövcut deyil")
@@ -154,10 +161,17 @@ class GowitnessEngine:
         outdir = os.path.join("reports", "screenshots",
                               str(db.effective_scan_id(self.ctx.scan_id)))
         os.makedirs(outdir, exist_ok=True)
-        targets = "\n".join(f"https://{h['subdomain']}" for h in hosts)
-        proc = await run_process(
+        targets = [f"https://{h['subdomain']}" for h in hosts]
+        # Faza 1.2: FİKS — gowitness əvvəllər egress qapısını tamamilə
+        # keçirdi (hədəflər stdin ilə gizlədilirdi). İndi hədəflər açıq
+        # verilir və scope + fail-closed DNS yoxlamasından keçir.
+        proc = await self.ctx.egress.run(
             ["gowitness", "scan", "file", "-", "--screenshot-path", outdir,
-             "--write-db", "--no-http"], stdin=targets.encode(), timeout=TIMEOUT)
+             "--write-db", "--no-http"],
+            targets=targets, stdin="\n".join(targets).encode(), timeout=TIMEOUT)
+        if proc.blocked:
+            res.warn("egress: gowitness hədəfləri scope/DNS qapısı ilə bloklandı")
+            return res
         if proc.missing:
             res.warn("gowitness tapılmadı — skrinşot atlandı")
             return res.skip("gowitness mövcud deyil")
@@ -189,9 +203,12 @@ class DnstwistEngine:
         except ScopeError as exc:
             res.fail(f"scope xaricində hədəf rədd edildi: {exc}")
             return res
-        proc = await run_process(
+        proc = await self.ctx.egress.run(
             ["dnstwist", "--registered", "--format", "json", domain],
-            timeout=TIMEOUT)
+            targets=[domain], timeout=TIMEOUT)
+        if proc.blocked:
+            res.fail(f"egress: {domain} scope/RoE qapısı ilə bloklandı")
+            return res
         if proc.missing:
             res.warn("dnstwist tapılmadı — atlandı")
             return res.skip("dnstwist mövcud deyil")

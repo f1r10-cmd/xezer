@@ -370,7 +370,11 @@ class Conductor:
         status = "completed"
         try:
             await self.ctx.oob.start()
-            await body()
+            # Faza 1.2: skan boyu MƏCBURİ subprocess egress qapısı aktivdir.
+            # Hər `run_process` çağırışı (hansı mühərrikdən gəlməsindən asılı
+            # olmayaraq) scope + fail-closed DNS yoxlamasından keçir.
+            with self.ctx.egress.activate():
+                await body()
         except asyncio.CancelledError:
             self.authorization.cancel()
             status = "cancelled"

@@ -9,6 +9,9 @@ Təhlükəsizlik prinsipləri:
     hər server `authorize_url()` ilə yoxlanılır. Scope xarici serverlər RƏDD
     edilir və loglanır (səssizcə əvəzlənmir). Schemathesis yalnız təsdiqlənmiş
     baza URL-lərini (`--base-url`) alır.
+  * **Sxem sənədi HttpPolicy-dən keçir** (Faza 1.3): `aiohttp` birbaşa
+    çağırışı yerinə `ctx.guardian.get()` istifadə olunur → hər sorğu və hər
+    redirect addımı scope yoxlamasından + rate limitdən keçir.
   * Nəticələr "candidate" kimi qeyd olunur; avtomatik "confirmed" iddiası yoxdur.
   * Credential hücumu, brute force və data extraction YOXDUR.
 """
@@ -20,8 +23,10 @@ import os
 import tempfile
 from urllib.parse import urljoin, urlsplit
 
+import aiohttp
+
 from .. import db
-from ..adapters.base import run_process
+from ..http_policy import TargetBlocked
 from ..results import EngineResult
 from ..scope import ScopeError
 
@@ -117,7 +122,8 @@ class APIFuzzEngine:
         return good, bad
 
     async def _schemathesis(self, row, res: EngineResult) -> None:
-        doc = await self._fetch_document(row["url"])
+        async with aiohttp.ClientSession() as session:
+            doc = await self._fetch_document(session, row["url"])
         if doc is None:
             res.warn(f"sxem oxuna bilmədi: {row['url']}")
             return
@@ -134,7 +140,7 @@ class APIFuzzEngine:
 
     async def _run_one(self, row, base_url: str, res: EngineResult) -> None:
         # Faza 0.2: schemathesis hədəfləri (sənəd + baza URL) egress
-        # validasiyasından keçir (scope + DNS pinning).
+        # validasiyasından keçir (scope + fail-closed DNS pinning).
         tset = await self.ctx.egress.authorize_process_targets(
             [row["url"], base_url])
         if base_url not in tset.urls:
@@ -143,14 +149,17 @@ class APIFuzzEngine:
         fd, result_file = tempfile.mkstemp(prefix="qbh_st_", suffix=".json")
         os.close(fd)
         try:
-            proc = await run_process([
+            proc = await self.ctx.egress.run([
                 "schemathesis", "run", row["url"],
                 "--base-url", base_url,
                 "-M", "GET",
                 "--checks", "all",
                 "--max-examples", str(MAX_EXAMPLES),
                 "-o", "json", result_file,
-            ], timeout=TIMEOUT)
+            ], targets=[row["url"], base_url], timeout=TIMEOUT)
+            if proc.blocked:
+                res.warn(f"schemathesis {base_url}: egress qapısı bloklandı")
+                return
             if proc.missing:
                 res.warn("schemathesis tapılmadı (pip install schemathesis)")
                 return
@@ -175,18 +184,33 @@ class APIFuzzEngine:
             res.findings += 1
             print(f"[🧪] {row['subdomain']}: {failures} failure (candidate)")
 
-    async def _fetch_document(self, url: str):
-        """Sxem sənədini yükləyir (yalnız artıq scope-daxili təsdiqlənmiş URL)."""
-        import aiohttp
+    async def _fetch_document(self, session, url: str):
+        """Sxem sənədini HttpPolicy (Guardian) vasitəsilə yükləyir (Faza 1.3).
 
+        Əvvəllər birbaşa `aiohttp.ClientSession().get()` istifadə olunurdu →
+        `HttpPolicy`-dən kənar idi (scope/redirect/rate yoxlaması yox). İndi
+        `ctx.guardian.get()` çağırılır: hər sorğu və hər redirect addımı vahid
+        siyasətdən (scope + rate limit + cooldown) keçir.
+        """
+        guardian = getattr(self.ctx, "guardian", None)
         try:
-            async with aiohttp.ClientSession() as session:
+            if guardian is not None:
+                r = await guardian.get(
+                    session, url, allow_redirects=True,
+                    headers={"Accept": "application/json, */*"})
+                status, text = r.status, r.text
+            elif hasattr(self.ctx, "authorize_url"):
+                self.ctx.authorize_url(url)          # scope qapısı (fail-closed)
                 async with session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=30)) as r:
-                    if r.status != 200:
-                        return None
-                    text = await r.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                        url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    status = resp.status
+                    text = await resp.text()
+            else:  # pragma: no cover - qoruyucu: heç bir icazəli yol yoxdur
+                return None
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError,
+                ScopeError, TargetBlocked):
+            return None
+        if status != 200:
             return None
         try:
             return json.loads(text)

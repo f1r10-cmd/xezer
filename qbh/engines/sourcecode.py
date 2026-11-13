@@ -101,13 +101,16 @@ class SourceCodeEngine(OffensiveEngine):
 
     async def _dump_and_scan(self, sub: str, fid: int, semgrep: str | None,
                              res: EngineResult) -> None:
-        from ..adapters.base import run_process
-
         url = f"https://{sub}/.git/"
         tmp = tempfile.mkdtemp(prefix="qbh_gitdump_")
         try:
-            proc = await run_process(["git-dumper", url, tmp],
-                                     timeout=self.timeout)
+            # Faza 1.2: git-dumper hədəfi TƏK egress qapısından keçir
+            # (scope + fail-closed DNS pinning).
+            proc = await self.ctx.egress.run(
+                ["git-dumper", url, tmp], targets=[url], timeout=self.timeout)
+            if proc.blocked:
+                res.warn(f"{sub}: egress qapısı git-dumper-ı bloklandı")
+                return
             if proc.missing or proc.timed_out:
                 res.warn(f"{sub}: git-dumper uğursuz (dump alınmadı)")
                 return

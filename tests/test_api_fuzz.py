@@ -155,3 +155,92 @@ class TestEngineGuard:
         ctx.scan_id = 1
         res = await E(ctx).run()
         assert res.skipped is True
+
+
+# -------------------------------------------- OpenAPI yükləməsi (Faza 1.3)
+class TestFetchDocumentPolicy:
+    """Sübut: sxem sənədi artıq HttpPolicy (Guardian) qapısından keçir.
+
+    Tarixi qüsur: `aiohttp.ClientSession().get()` birbaşa çağırılırdı →
+    scope/redirect/rate yoxlaması YOX idi.
+    """
+
+    async def test_out_of_scope_doc_returns_none(self, tmp_db, make_ctx):
+        import aiohttp
+
+        eng = E(make_ctx())
+        async with aiohttp.ClientSession() as session:
+            doc = await eng._fetch_document(
+                session, "http://evil.example.com/openapi.json")
+        assert doc is None
+
+    async def test_in_scope_loopback_doc_parsed(self, tmp_db, make_ctx):
+        import aiohttp
+        from aiohttp import web
+
+        async def schema(request):
+            return web.json_response({"openapi": "3.0.0",
+                                      "servers": [{"url": "/v1"}]})
+
+        app = web.Application()
+        app.add_routes([web.get("/openapi.json", schema)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        try:
+            eng = E(make_ctx())
+            async with aiohttp.ClientSession() as session:
+                doc = await eng._fetch_document(
+                    session, f"http://127.0.0.1:{port}/openapi.json")
+        finally:
+            await runner.cleanup()
+        assert isinstance(doc, dict)
+        assert doc["openapi"] == "3.0.0"
+
+    async def test_non_json_doc_returns_none(self, tmp_db, make_ctx):
+        import aiohttp
+        from aiohttp import web
+
+        async def html(request):
+            return web.Response(text="<html>not json</html>",
+                                content_type="text/html")
+
+        app = web.Application()
+        app.add_routes([web.get("/openapi.json", html)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        try:
+            eng = E(make_ctx())
+            async with aiohttp.ClientSession() as session:
+                doc = await eng._fetch_document(
+                    session, f"http://127.0.0.1:{port}/openapi.json")
+        finally:
+            await runner.cleanup()
+        assert doc is None
+
+    async def test_fallback_without_guardian_enforces_scope(self, tmp_db,
+                                                            loopback_config):
+        """Guardian yoxdursa belə scope qapısı işləyir (fail-closed)."""
+        import aiohttp
+
+        from qbh.authorization import from_config
+
+        auth = from_config(loopback_config)
+
+        class _StubCtx:
+            def __init__(self):
+                self.cfg = loopback_config
+
+            def authorize_url(self, url):
+                return auth.authorize_url(url)
+
+        eng = E(_StubCtx())
+        async with aiohttp.ClientSession() as session:
+            doc = await eng._fetch_document(
+                session, "http://evil.example.com/openapi.json")
+        assert doc is None

@@ -212,11 +212,13 @@ class TestReconDeepening:
 
     async def test_bbot_skips_when_missing(self, tmp_db, make_ctx, monkeypatch):
         from qbh.adapters.base import ProcResult
+        from qbh.egress import EgressController
 
-        async def _missing(*a, **k):
+        async def _missing(self, *a, **k):
             return ProcResult(-1, missing=True)
 
-        monkeypatch.setattr("qbh.engines.deepen.run_process", _missing)
+        # Faza 1.2: mühərriklər artıq `ctx.egress.run()` (TƏK qapı) işlədir.
+        monkeypatch.setattr(EgressController, "run", _missing)
         res = await BBOTEngine(_ctx(make_ctx)).run("127.0.0.1")
         assert res.skipped is True
 

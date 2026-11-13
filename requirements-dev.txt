@@ -9,3 +9,7 @@ pytest>=8.0
 pytest-asyncio>=0.23
 pytest-cov>=5.0
 ruff>=0.6
+# Faza 3.2 secret vault (Fernet) testləri üçün — yalnız inkişaf/test.
+# Runtime bunu tələb etmir: `qbh/vault.py` cryptography olmadıqda dürüst
+# şəkildə `available=False` olur (graceful degradation qorunur).
+cryptography>=42.0

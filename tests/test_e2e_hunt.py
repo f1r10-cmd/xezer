@@ -33,6 +33,19 @@ _LOOPBACK_HOSTS = {
 }
 
 
+def _fernet_key() -> str:
+    """Runtime-da etibarlı Fernet açarı törədir (hardcoded secret YOXDUR).
+
+    `QBH_VAULT_KEY` fixture-da dəyişən (`monkeypatch.setenv`) ilə ötürülür;
+    açar heç vaxt mənbə kodunda saxlanmır — beləliklə secret-scanning
+    (gitleaks) yalançı-pozitivi yaranmır. Açar eyni test icrası boyu
+    sabitdir (vault HƏMİN açarı oxuyur).
+    """
+    from cryptography.fernet import Fernet
+
+    return Fernet.generate_key().decode()
+
+
 @pytest.fixture
 def no_external_network(monkeypatch):
     """Xarici şəbəkə və subprocess çıxışını qəti şəkildə bloklayır.
@@ -136,7 +149,7 @@ class TestHuntEndToEnd:
             no_external_network, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         # Şifrəli secret vault aktiv olsun (secret replay üçün).
-        monkeypatch.setenv("QBH_VAULT_KEY", "e2e-fixture-key-1234567890")
+        monkeypatch.setenv("QBH_VAULT_KEY", _fernet_key())
         cfg = write_config([
             {"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
              "out_of_scope": []}])
@@ -199,7 +212,7 @@ class TestHuntEndToEnd:
             no_external_network, monkeypatch, tmp_path):
         """Xarici DNS sorğusu bloklanır və heç bir paket kənara çıxmır."""
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("QBH_VAULT_KEY", "e2e-fixture-key-1234567890")
+        monkeypatch.setenv("QBH_VAULT_KEY", _fernet_key())
         cfg = write_config([
             {"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
              "out_of_scope": []}])

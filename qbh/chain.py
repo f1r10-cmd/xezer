@@ -27,8 +27,10 @@ import re
 from dataclasses import dataclass, field
 
 from . import db
+from .engines.api_fuzz import APIFuzzEngine
 from .engines.bypass import BypassEngine
 from .engines.confirm import ConfirmEngine
+from .engines.param_enum import ParamEnumEngine
 from .engines.secret_replay import SecretReplayEngine
 from .results import EngineResult
 
@@ -60,8 +62,8 @@ ACTION_EXEC = {
     "js_analysis": "delegated", "extract_endpoints": "delegated",
     "extract_secrets": "delegated", "test_secret_endpoints": "local",
     "secret_replay": "local",
-    "hidden_param_detect": "delegated", "param_fuzz": "delegated",
-    "scope_validate": "local", "schemathesis_fuzz": "delegated",
+    "hidden_param_detect": "local", "param_fuzz": "local",
+    "scope_validate": "local", "schemathesis_fuzz": "local",
     "targeted_fuzz": "delegated", "sqli_suggestive": "delegated",
     "confirm_template": "local", "poc": "local",
     "bypass_matrix": "local", "capture_evidence": "delegated",
@@ -204,6 +206,16 @@ class ChainPipeline:
         for r in openapi:
             self.emit("openapi", r["url"])
 
+        # Faza 3.4: parametrli URL-lər → gizli parametr aşkarlanması + fuzz.
+        params = conn.execute(
+            "SELECT DISTINCT u.url FROM urls u JOIN hosts h ON h.id=u.host_id "
+            "WHERE u.is_js=0 AND u.url NOT LIKE '%##%' AND h.scan_id=? "
+            "AND u.source IN ('katana','gau','ffuf','ferox','api-enum',"
+            "'kiterunner') LIMIT 50",
+            (db.effective_scan_id(self.store.scan_id),)).fetchall()
+        if params:
+            self.emit("param", f"{len(params)} parametrli URL")
+
         interesting = conn.execute("SELECT url FROM urls LIMIT 800").fetchall()
         for r in interesting:
             if INTERESTING_RE.search(r["url"]):
@@ -284,6 +296,42 @@ class ChainPipeline:
                 confidence=max(float(r["confidence"] or 0.0), 0.75))
         return len(rows)
 
+    async def _run_param_steps(self, res: EngineResult) -> None:
+        """Faza 3.4: gizli parametr aşkarlanması + parametr fuzzinqi.
+
+        `param` tetikleyicisi ilə REAL icra olunur (əvvəllər "delegated" idi).
+        RoE qapısı `emit()` zamanı tətbiq olunur: `param_fuzz` aktiv fuzz
+        qadağası ilə bağlanır, `hidden_param_detect` isə yalnız oxuma (GET)
+        olduğu üçün açıqdır. Engine özü bütün scope/rate qapılarından keçir.
+        """
+        allowed = {a for e in self.events if e.kind == "param"
+                   for a in e.actions}
+        if not ({"hidden_param_detect", "param_fuzz"} & allowed):
+            return
+        if not self._budget_ok():
+            return
+        self._tasks += 1
+        sub = await ParamEnumEngine(self.ctx).run()
+        res.findings += sub.findings
+        res.warnings += sub.warnings
+        for action in ("hidden_param_detect", "param_fuzz"):
+            if action in allowed:
+                self.executed.append(action)
+
+    async def _run_openapi_steps(self, res: EngineResult) -> None:
+        """Faza 3.4: OpenAPI sxemi üzərində Schemathesis (GET-only) icrası."""
+        allowed = {a for e in self.events if e.kind == "openapi"
+                   for a in e.actions}
+        if "schemathesis_fuzz" not in allowed:
+            return
+        if not self._budget_ok():
+            return
+        self._tasks += 1
+        sub = await APIFuzzEngine(self.ctx).run()
+        res.findings += sub.findings
+        res.warnings += sub.warnings
+        self.executed.append("schemathesis_fuzz")
+
     async def run(self) -> EngineResult:
         res = EngineResult(stage="chain")
         if not self.enabled:
@@ -326,6 +374,10 @@ class ChainPipeline:
                 res.warnings.append(
                     f"nuclei: {boosted} medium+ tapıntıya sübut + confidence")
                 self.executed.append("boost_confidence")
+
+        # Faza 3.4: əvvəllər "delegated" olan addımlar indi REAL icra olunur.
+        await self._run_param_steps(res)
+        await self._run_openapi_steps(res)
 
         for ev in self.events:
             for action in ev.actions:

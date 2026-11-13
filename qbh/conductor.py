@@ -23,7 +23,6 @@ from .authorization import from_config as build_authorization
 from .context import Context
 from .engines import cve_intel
 from .engines.api_enum import APIEnumEngine
-from .engines.api_fuzz import APIFuzzEngine
 from .engines.content import ContentEngine
 from .engines.deep_enum import DeepEnumEngine
 from .engines.deepen import (
@@ -37,7 +36,6 @@ from .engines.fingerprint import FingerprintEngine
 from .engines.jsanalysis import JSAnalysisEngine
 from .engines.jwt import JWTEngine
 from .engines.library_cve import LibraryCVEEngine
-from .engines.param_enum import ParamEnumEngine
 from .engines.race import RaceEngine
 from .engines.recon import ReconEngine
 from .engines.sourcecode import SourceCodeEngine
@@ -264,10 +262,9 @@ class Conductor:
 
         await self._run_stage("api_enum", "",
                               lambda: APIEnumEngine(self.ctx).run())
-        await self._run_stage("api_fuzz", "",
-                              lambda: APIFuzzEngine(self.ctx).run())
-        await self._run_stage("param_enum", "",
-                              lambda: ParamEnumEngine(self.ctx).run())
+        # Faza 3.4: `param_enum` və `api_fuzz` (Schemathesis) artıq ChainPipeline
+        # tərəfindən trigger-əsaslı REAL icra olunur (RoE qapıları ilə) — burada
+        # təkrar skan/trafik yaratmamaq üçün ayrı mərhələ kimi işlədilmir.
 
         # Faza 1.1: offensive mühərriklər (RoE + nərdivan qapısı ilə).
         await self._run_offensive()

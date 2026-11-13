@@ -152,6 +152,71 @@ class TestRun:
         assert any(e["kind"] == "note" for e in db.evidence_for(fid))
 
 
+# ---------------------------------------------------------------- local exec (3.4)
+class TestLocalExecution:
+    def test_actions_are_local(self):
+        for action in ("param_fuzz", "hidden_param_detect", "schemathesis_fuzz"):
+            assert ACTION_EXEC[action] == "local"
+
+    async def test_param_steps_execute_hidden_param_detect(self, tmp_db, make_ctx):
+        hid = db.upsert_host("127.0.0.1", status_code=200, scan_id=1)
+        db.insert_url(hid, "http://127.0.0.1:1/a?id=1", "katana",
+                      is_js=False, scan_id=1)
+        ctx = _ctx_with_auth(make_ctx)
+        ctx.scan_id = 1
+        pipe = ChainPipeline(ctx)
+        pipe._discover_triggers()
+        assert any(e.kind == "param" for e in pipe.events)
+        res = EngineResult(stage="chain")
+        await pipe._run_param_steps(res)
+        assert "hidden_param_detect" in pipe.executed
+        assert "hidden_param_detect" not in pipe.delegated
+
+    async def test_param_fuzz_gated_but_detect_runs(self, tmp_db, make_ctx):
+        cfg = make_ctx().cfg
+        cfg.program_rules.forbidden = {"active_fuzz"}
+        ctx = make_ctx(cfg)
+        ctx.authorization = from_config(cfg)
+        ctx.scan_id = 1
+        hid = db.upsert_host("127.0.0.1", status_code=200, scan_id=1)
+        db.insert_url(hid, "http://127.0.0.1:1/a?id=1", "katana",
+                      is_js=False, scan_id=1)
+        pipe = ChainPipeline(ctx)
+        pipe._discover_triggers()
+        res = EngineResult(stage="chain")
+        await pipe._run_param_steps(res)
+        assert "hidden_param_detect" in pipe.executed
+        assert "param_fuzz" not in pipe.executed
+
+    async def test_openapi_steps_execute_schemathesis(self, tmp_db, make_ctx):
+        hid = db.upsert_host("127.0.0.1", status_code=200, scan_id=1)
+        db.insert_url(hid, "http://127.0.0.1:1/openapi.json", "katana",
+                      is_js=False, scan_id=1)
+        ctx = _ctx_with_auth(make_ctx)
+        ctx.scan_id = 1
+        pipe = ChainPipeline(ctx)
+        pipe._discover_triggers()
+        assert any(e.kind == "openapi" for e in pipe.events)
+        res = EngineResult(stage="chain")
+        await pipe._run_openapi_steps(res)
+        assert "schemathesis_fuzz" in pipe.executed
+
+    async def test_schemathesis_gated_by_active_fuzz(self, tmp_db, make_ctx):
+        cfg = make_ctx().cfg
+        cfg.program_rules.forbidden = {"active_fuzz"}
+        ctx = make_ctx(cfg)
+        ctx.authorization = from_config(cfg)
+        ctx.scan_id = 1
+        hid = db.upsert_host("127.0.0.1", status_code=200, scan_id=1)
+        db.insert_url(hid, "http://127.0.0.1:1/openapi.json", "katana",
+                      is_js=False, scan_id=1)
+        pipe = ChainPipeline(ctx)
+        pipe._discover_triggers()
+        res = EngineResult(stage="chain")
+        await pipe._run_openapi_steps(res)
+        assert "schemathesis_fuzz" not in pipe.executed
+
+
 # ---------------------------------------------------------------- finding store
 class TestFindingStore:
     def test_candidate_then_confirm(self, tmp_db):

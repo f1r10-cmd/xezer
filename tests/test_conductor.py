@@ -374,11 +374,13 @@ class TestRunModes:
 
         monkeypatch.setattr(c, "_run_stage", rec)
         await c.run_vuln()
-        for expected in ("fingerprint", "wafdetect", "vuln", "js", "content",
-                         "ferox", "api_enum", "api_fuzz", "param_enum",
+        for expected in ("fingerprint", "wafdetect", "takeover", "vuln", "js",
+                         "content", "ferox", "api_enum",
                          "race", "cve_intel", "library_cve", "validation",
                          "chain"):
             assert expected in calls
+        # Faza 3.4: param_enum/api_fuzz artıq ChainPipeline-ın REAL icrasıdır.
+        assert "param_enum" not in calls and "api_fuzz" not in calls
         # offensive mühərriklər (default aggressive profil → aktivdir)
         assert "sqli" in calls and "xss" in calls
 

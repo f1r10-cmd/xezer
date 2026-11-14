@@ -115,6 +115,21 @@ class TestRunStage:
         assert sr.status == "failed"
         assert any("partladı" in e for e in sr.errors)
 
+    async def test_partial_result_maps_to_partial_status(self, make_conductor):
+        c = make_conductor()
+
+        async def factory():
+            res = EngineResult(stage="p", ok=True)
+            res.mark_partial("qismən nəticə")
+            return res
+
+        sr = await c._run_stage("p", "", factory)
+        assert sr.status == "partial"          # "ok" DEYİL
+        assert sr.findings_count == 0
+        assert any("qismən nəticə" in w for w in sr.warnings)
+        assert c.partial_stages == [sr]
+        assert c.failed_stages == []
+
     async def test_exception_is_caught_not_swallowed(self, make_conductor):
         c = make_conductor()
 
@@ -237,6 +252,21 @@ class TestPipeline:
         async def body():
             c.stages.append(_stage("a", "ok"))
             c.stages.append(_stage("b", "failed"))
+
+        await c._pipeline("full", body)
+        assert _scan_status(c.scan_id) == "partial"
+
+    async def test_partial_when_a_stage_is_partial_not_failed(self,
+                                                             make_conductor,
+                                                             monkeypatch):
+        # Bütün mərhələlər "failed" olmasa da, biri `partial`-dirsə skan
+        # TAM UĞURLU sayılmamalıdır.
+        c = make_conductor()
+        monkeypatch.setattr(c, "generate_report", lambda: "r")
+
+        async def body():
+            c.stages.append(_stage("a", "ok"))
+            c.stages.append(_stage("b", "partial"))
 
         await c._pipeline("full", body)
         assert _scan_status(c.scan_id) == "partial"

@@ -177,10 +177,14 @@ class APIEnumEngine:
             ["kr", "scan", base, "-w", wordlist, "--force-method", "GET"],
             timeout=TARGET_TIMEOUT)
         if proc.missing:
+            # Zaman aşımı DEYİL — bunu `partial` kimi işarələmirik.
             res.warn("kiterunner (kr) tapılmadı")
             return
         if proc.timed_out:
-            res.warn(f"kiterunner {host}: timeout — qismən nəticələr yoxlanılır")
+            # Zaman aşımı → qismən nəticə: fallback tapıntıları saxlanılır,
+            # lakin mərhələ tam uğurlu sayılmır.
+            res.mark_partial(
+                f"kiterunner {host}: timeout — qismən nəticələr yoxlanılır")
         self._parse_kr(row, proc.stdout.decode(errors="ignore"), ep, res)
 
     def _parse_kr(self, row, text: str, ep, res: EngineResult) -> None:

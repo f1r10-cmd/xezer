@@ -263,6 +263,21 @@ class TestFailedStages:
         assert "**Atlanan mərhələlər:** bbot" in text
         assert "boom" in text
 
+    def test_partial_stage_is_visible(self, tmp_db, tmp_path, monkeypatch):
+        # `partial` mərhələlər hesabatda AÇIQ göstərilməlidir (uğur kimi yox).
+        monkeypatch.chdir(tmp_path)
+        stages = [
+            StageResult(stage="api_enum", status="partial",
+                        started_at=now_iso(),
+                        warnings=["kiterunner 127.0.0.1: timeout"]),
+            StageResult(stage="fingerprint", status="ok", started_at=now_iso()),
+        ]
+        path = generator.generate(stages=stages)
+        text = _md(path)
+        # Mərhələ adı markdown-escape olunur ("api\_enum").
+        assert "**Natamam mərhələlər (qismən nəticə):** api\\_enum" in text
+        assert "| api\\_enum | partial |" in text
+
     def test_chain_and_rotation_audit_rendered(self, tmp_db, tmp_path,
                                                monkeypatch):
         monkeypatch.chdir(tmp_path)

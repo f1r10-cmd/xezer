@@ -48,9 +48,16 @@ class ContentEngine:
         if not os.path.exists(WORDLIST):
             return res.skip(f"wordlist yoxdur: {WORDLIST} (apt install seclists)")
 
-        hosts = db.alive_hosts(self.ctx.scan_id)[:conf.max_hosts]
+        alive = db.alive_hosts(self.ctx.scan_id)
+        hosts = alive[:conf.max_hosts]
         if not hosts:
             return res.skip("yaşayan host yoxdur — content discovery atlandı")
+        if len(alive) > len(hosts):
+            # Limit FAKTİKİ olaraq əhatəni kəsir → mərhələ natamamdır.
+            res.mark_partial(
+                f"{len(alive)} yaşayan host var, lakin content.max_hosts="
+                f"{conf.max_hosts} — yalnız {len(hosts)} host skan olunur "
+                "(əhatə məhdudlaşdırıldı)")
         print(f"[═══ M5 CONTENT (ffuf) ═══] {len(hosts)} host")
 
         for row in hosts:
@@ -77,7 +84,10 @@ class ContentEngine:
             return
         wordlist, tmp_words = limited_wordlist(WORDLIST, conf.max_words)
         if tmp_words:
-            res.warn(f"{host}: wordlist {conf.max_words} sətrə məhdudlaşdırıldı")
+            # Wordlist FAKTİKİ olaraq kəsildi → əhatə tam deyil.
+            res.mark_partial(
+                f"{host}: wordlist {conf.max_words} sətrə məhdudlaşdırıldı — "
+                "əhatə tam skan olunmur")
         fd, out_file = tempfile.mkstemp(prefix="qbh_ffuf_", suffix=".json")
         os.close(fd)
         # Faza 3.6: WAF-a görə rate/concurrency + insan-təqlidi başlıqlar.

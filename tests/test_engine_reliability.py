@@ -153,6 +153,25 @@ class TestServiceResolver:
             with pytest.raises(ScopeError):
                 await resolver.resolve(session, "evil.example.com")
 
+    async def test_cache_is_isolated_between_resolvers(self, tmp_db, make_ctx,
+                                                       monkeypatch):
+        """Ayrı resolver nüsxələri keş PAYLAŞMIR → skanlar arası sızma YOXDUR."""
+        ctx = _ctx(make_ctx)
+        calls = _install_get(monkeypatch, ctx.guardian,
+                             lambda url: _http(url, 200))
+        r1 = ServiceResolver(ctx.guardian)
+        r2 = ServiceResolver(ctx.guardian)
+        assert r1._cache is not r2._cache  # ayrı keş obyektləri
+        async with aiohttp.ClientSession() as session:
+            ep1 = await r1.resolve(session, "127.0.0.1", hint="http")
+        assert ep1.scheme == "http"
+        # r2-nin keşi BOŞdur → r1-in qərarı sızmır; hint özü zondlanır.
+        assert r2.cached("127.0.0.1") is None
+        async with aiohttp.ClientSession() as session:
+            ep2 = await r2.resolve(session, "127.0.0.1", hint="https")
+        assert ep2.scheme == "https"
+        assert len(calls) == 2  # hər resolver yalnız öz (maks. 1) zondunu edir
+
 
 # ============================================================== fingerprint
 
@@ -453,7 +472,31 @@ class TestContentReliability:
         self._prep(tmp_path, monkeypatch, _mk_run(_VALID_JSON), lines=5)
         db.upsert_host("127.0.0.1", scan_id=1, status_code=200)
         res = await ContentEngine(_ctx(make_ctx, cfg=cfg)).run()
+        # Wordlist kəsildi → əhatə tam deyil → mərhələ natamamdır.
+        assert res.partial is True
         assert any("2 sətrə məhdudlaşdırıldı" in w for w in res.warnings)
+
+    async def test_max_hosts_limit_marks_partial(self, tmp_db, make_ctx,
+                                                 monkeypatch, tmp_path,
+                                                 load_config):
+        cfg = load_config([{"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
+                            "out_of_scope": []}],
+                          extra={"content": {"max_hosts": 1}})
+        self._prep(tmp_path, monkeypatch, _mk_run(_VALID_JSON))
+        for host in ("127.0.0.1", "127.0.0.2"):
+            db.upsert_host(host, scan_id=1, status_code=200)
+        res = await ContentEngine(_ctx(make_ctx, cfg=cfg)).run()
+        assert res.partial is True
+        assert any("content.max_hosts=1" in w for w in res.warnings)
+
+    async def test_no_partial_when_within_limits(self, tmp_db, make_ctx,
+                                                 monkeypatch, tmp_path):
+        # Default limitlər daxilində: nə wordlist, nə host kəsilir → partial YOX.
+        self._prep(tmp_path, monkeypatch, _mk_run(_VALID_JSON), lines=5)
+        db.upsert_host("127.0.0.1", scan_id=1, status_code=200)
+        res = await ContentEngine(_ctx(make_ctx)).run()
+        assert res.partial is False
+        assert not any("məhdudlaşdırıldı" in w for w in res.warnings)
 
     async def test_temp_files_cleaned_after_cancel(self, tmp_db, make_ctx,
                                                    monkeypatch, tmp_path):
@@ -618,11 +661,49 @@ class TestAPIEnumReliability:
         monkeypatch.setattr("qbh.engines.api_enum.run_process", _run)
         db.upsert_host("127.0.0.1", scan_id=1, status_code=200)
         ctx = _ctx(make_ctx, cfg=cfg)
+
+        def handler(url):  # fallback da nəticə tapır → fallback uğuru qorunur
+            if url.endswith("/openapi.json") or url.endswith("/"):
+                return _http(url, 200, text="{}")
+            return _http(url, 404)
+
+        _install_get(monkeypatch, ctx.guardian, handler)
+        res = await APIEnumEngine(ctx).run()
+        # Timeout → mərhələ NATAMAM, lakin uydurma uğursuzluq yoxdur.
+        assert res.partial is True and res.ok is True
+        assert any("timeout" in w for w in res.warnings)
+        # Həm Kiterunner qismən nəticəsi, həm fallback tapıntısı saxlanılır.
+        assert _urls_by_source("kiterunner") == 1
+        assert _urls_by_source("api-enum") >= 1
+        assert res.findings >= 2
+
+    async def test_kr_missing_is_not_partial(self, tmp_db, make_ctx,
+                                             monkeypatch, load_config):
+        # 'kr' yoxdur → timeout DEYİL → mərhələ partial olmamalıdır.
+        cfg = load_config([{"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
+                            "out_of_scope": []}])
+        self._kr_missing(monkeypatch)
+        db.upsert_host("127.0.0.1", scan_id=1, status_code=200)
+        ctx = _ctx(make_ctx, cfg=cfg)
         _install_get(monkeypatch, ctx.guardian, self._probe_only_ok)
         res = await APIEnumEngine(ctx).run()
-        assert res.ok is True
-        assert any("timeout" in w for w in res.warnings)
-        assert _urls_by_source("kiterunner") == 1
+        assert res.partial is False
+        assert any("kiterunner (kr) tapılmadı" in w for w in res.warnings)
+
+    async def test_route_files_missing_is_not_partial(self, tmp_db, make_ctx,
+                                                      monkeypatch, load_config):
+        # Route faylı yoxdur → timeout DEYİL → mərhələ partial olmamalıdır.
+        cfg = load_config(
+            [{"domain": "127.0.0.1", "in_scope": ["127.0.0.1"],
+              "out_of_scope": []}],
+            extra={"api_enum": {"route_paths": ["/no/such/routes"]}})
+        self._kr_available(monkeypatch)
+        db.upsert_host("127.0.0.1", scan_id=1, status_code=200)
+        ctx = _ctx(make_ctx, cfg=cfg)
+        _install_get(monkeypatch, ctx.guardian, self._probe_only_ok)
+        res = await APIEnumEngine(ctx).run()
+        assert res.partial is False
+        assert any("route faylı (.kite) tapılmadı" in w for w in res.warnings)
 
     async def test_openapi_fallback_works(self, tmp_db, make_ctx,
                                           monkeypatch, load_config):

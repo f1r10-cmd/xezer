@@ -13,8 +13,28 @@ import urllib.parse
 from .. import db
 from ..adapters.base import run_process
 from ..antiblock.ua_rotator import ua_for
+from ..installer import resolve_httpx
+from ..redact import redact
 from ..results import EngineResult
 from ..scope import ScopeError, normalize_host
+
+#: Uğursuz alt-prosesin stderr-indən loglara yazılan maksimum simvol sayı.
+_STDERR_LIMIT = 400
+
+
+def _stderr_excerpt(raw: bytes, limit: int = _STDERR_LIMIT) -> str:
+    """stderr-i təhlükəsiz, MƏHDUD uzunluqda qaytarır (secret-lər maskalanır).
+
+    Çox uzun stderr logları şişirməsin deyə kəsilir; `redact` ilə mümkün
+    secret-lər maskalanır (heç bir həssas dəyər açıq yazılmır).
+    """
+    text = redact(raw.decode(errors="ignore")).strip()
+    if not text:
+        return "(stderr boşdur)"
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
 
 
 class ReconEngine:
@@ -95,23 +115,45 @@ class ReconEngine:
         # Faza 3.6: ilk təmas — random UA + təmkinli rate (WAF hələ bilinmir).
         plan = self.ctx.stealth.plan(
             self.rate * 10, base_concurrency=50, phase="httpx")
+        alive: list[dict] = []
+        # ProjectDiscovery httpx-in YOXLANILMIŞ yolu (PATH-dəki əlaqəsiz
+        # "httpx" adlı proqram deyil). Tapılmasa uyğunsuz binari icra olunmur.
+        exe = await resolve_httpx()
+        if not exe:
+            self._warn_missing(res, "httpx", "canlı host aşkarlanmadı")
+            return alive
         res_proc = await run_process(
-            ["httpx", "-json", "-silent", "-tech-detect", "-title",
+            [exe, "-json", "-silent", "-tech-detect", "-title",
              "-cdn", "-status-code", "-no-color", "-random-agent",
              "-rate-limit", str(plan.rate_arg())],
             stdin=inp.encode(), timeout=600)
-        alive: list[dict] = []
+        # Hər ProcResult vəziyyəti AÇIQ şəkildə idarə olunur — uğursuz
+        # alt-proses HEÇ VAXT "0 canlı host" kimi uğurlu təqdim edilmir.
         if res_proc.missing:
             self._warn_missing(res, "httpx", "canlı host aşkarlanmadı")
             return alive
+        if res_proc.blocked:
+            res.fail("httpx: egress/scope qapısı alt-prosesi BLOKLADI — "
+                     "skan başladılmadı (canlı host nəticəsi yoxdur)")
+            return alive
         if res_proc.timed_out:
-            res.warn("httpx timeout")
+            res.fail("httpx: timeout — nəticələr natamamdır "
+                     "(canlı host nəticəsi etibarsız)")
+            return alive
+        if res_proc.returncode != 0:
+            res.fail(f"httpx: proses uğursuz oldu (çıxış kodu "
+                     f"{res_proc.returncode}): {_stderr_excerpt(res_proc.stderr)}")
             return alive
 
+        malformed = 0
         for line in res_proc.stdout.decode(errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
+                malformed += 1
                 continue
             host = urllib.parse.urlparse(r.get("url", "")).hostname or ""
             try:
@@ -138,6 +180,15 @@ class ReconEngine:
                           "status": r.get("status_code")})
             if len(alive) >= self.max_alive:
                 break
+        if malformed:
+            res.warn(f"httpx: {malformed} xətalı JSON sətri atlandı "
+                     "(nəticələr natamam ola bilər)")
+        if not alive:
+            if res_proc.stdout.strip():
+                res.warn("httpx: scope-daxili etibarlı nəticə tapılmadı")
+            else:
+                res.warn("httpx: nəticə qaytarılmadı (boş çıxış) — hədəf "
+                         "əlçatmaz sayılmır")
         print(f"[+] {len(alive)} yaşayan host")
         return alive
 

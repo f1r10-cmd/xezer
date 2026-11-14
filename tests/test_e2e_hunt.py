@@ -103,7 +103,12 @@ def fake_recon_tools(vuln_app, monkeypatch):
         # naabu/gau və digər recon alətləri yoxdur → dürüst `missing`.
         return ProcResult(-1, missing=True)
 
+    async def _fake_resolve_httpx(**_kw):
+        # Mühitdə ProjectDiscovery httpx YOXDUR → doğrulanmış yol təqlid edilir.
+        return "httpx"
+
     monkeypatch.setattr("qbh.engines.recon.run_process", _fake_run)
+    monkeypatch.setattr("qbh.engines.recon.resolve_httpx", _fake_resolve_httpx)
     return vuln_app
 
 

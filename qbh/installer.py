@@ -14,6 +14,7 @@ Prinsiplər:
 """
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -22,6 +23,84 @@ from dataclasses import dataclass, field
 from .adapters.base import run_process
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
+#: ProjectDiscovery httpx binari-sini AÇIQ şəkildə təyin etmək üçün mühit
+#: dəyişəni (prioritet 1). İstifadəçinin home qovluğu KODDA hardcode edilmir.
+_HTTPX_BIN_ENV = "QBH_HTTPX_BIN"
+
+#: Əlaqəsiz Python `httpx` CLI (click) versiyanı "httpx, version X.Y" yazır.
+_PY_HTTPX_RE = re.compile(r"httpx\s*,\s*version")
+
+#: ProjectDiscovery httpx imzaları: banner ("projectdiscovery"), versiya sətri
+#: ("httpx v1.12.0" / "httpx version v1.12.0") və ya "Current Version: vX.Y".
+_PD_HTTPX_RE = re.compile(
+    r"projectdiscovery"
+    r"|\bhttpx\b[ \t]+(?:version[ \t]+)?v?\d+\.\d+"
+    r"|current version[:\s]+v?\d+\.\d+")
+
+
+def looks_like_pd_httpx(text: str) -> bool:
+    """Çıxışı ProjectDiscovery httpx-ə aid edir — fayl adına DEYİL, məzmuna görə.
+
+    Python `httpx` CLI (click) versiyanı "httpx, version X" kimi yazır; bu,
+    ProjectDiscovery binari-sindən AÇIQ şəkildə fərqlənir və rədd edilir.
+    """
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+    if _PY_HTTPX_RE.search(low):
+        return False
+    return _PD_HTTPX_RE.search(low) is not None
+
+
+def httpx_candidates() -> list[str]:
+    """ProjectDiscovery httpx üçün namizəd yollar (prioritet sırası ilə).
+
+    1. Açıq konfiqurasiya — `QBH_HTTPX_BIN` mühit dəyişəni.
+    2. `~/go/bin/httpx` (`os.path.expanduser`; home hardcode edilmir).
+    3. PATH-də `httpx` (`shutil.which`) — yalnız validasiyadan keçərsə.
+    """
+    cands: list[str] = []
+    explicit = os.environ.get(_HTTPX_BIN_ENV, "").strip()
+    if explicit:
+        cands.append(explicit)
+    cands.append(os.path.join(os.path.expanduser("~"), "go", "bin", "httpx"))
+    which = shutil.which("httpx")
+    if which:
+        cands.append(which)
+    out: list[str] = []
+    for cand in cands:
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
+async def validate_pd_httpx(path: str, *, timeout: float = 20.0) -> bool:
+    """Yolu MƏHDUD alt-proses versiya yoxlaması ilə ProjectDiscovery httpx kimi doğrular.
+
+    Yalnız fayl adına GÜVƏNİLMİR: `-version` çağırılır (bounded timeout) və
+    çıxışın ProjectDiscovery imzasını daşıdığı yoxlanılır. Uyğun deyilsə
+    `False` → uyğunsuz binari-yə SƏSSİZCƏ keçid OLUNMUR.
+    """
+    if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+        return False
+    res = await run_process([path, "-version"], timeout=timeout)
+    if not res.ok:
+        return False
+    text = (res.stdout + b"\n" + res.stderr).decode(errors="ignore")
+    return looks_like_pd_httpx(text)
+
+
+async def resolve_httpx(*, timeout: float = 20.0) -> str:
+    """Doğrulanmış ProjectDiscovery httpx binari-sinin yolunu qaytarır.
+
+    Heç bir namizəd doğrulanmazsa boş sətir qaytarır (fail-closed) — çağıran
+    tərəf bunu "alət yoxdur" kimi dürüst raportlamalıdır.
+    """
+    for cand in httpx_candidates():
+        if await validate_pd_httpx(cand, timeout=timeout):
+            return cand
+    return ""
 
 
 @dataclass(frozen=True)
@@ -173,11 +252,33 @@ def _parse_version(text: str) -> str:
 
 
 async def _detect_one(spec: ToolSpec) -> ToolStatus:
+    # httpx: PATH-dəki hər hansı "httpx" adlı proqram (məs. Python `httpx` CLI)
+    # DEYİL, ProjectDiscovery binari-si aşkarlanmalıdır → xüsusi yoxlama.
+    if spec.name == "httpx":
+        return await _detect_httpx(spec)
     if shutil.which(spec.binary_name()) is None:
         return ToolStatus(spec.name, spec.required, False, spec.install_kind)
     res = await run_process(list(spec.version_cmd), timeout=20)
     version = _parse_version(res.stdout.decode(errors="ignore")
                              or res.stderr.decode(errors="ignore"))
+    return ToolStatus(spec.name, spec.required, True, spec.install_kind,
+                      version=version, install_status="present",
+                      verified=True)
+
+
+async def _detect_httpx(spec: ToolSpec) -> ToolStatus:
+    """httpx üçün ProjectDiscovery-yə XAS aşkarlama.
+
+    Doğrulanmış binari tapılmazsa `present=False` qaytarır — beləliklə
+    qurulumdan əvvəl `~/go/bin/httpx` varsa lazımsız qurulum TETİKLƏNMİR,
+    yoxdursa isə quraşdırma yoluna keçilir.
+    """
+    path = await resolve_httpx()
+    if not path:
+        return ToolStatus(spec.name, spec.required, False, spec.install_kind)
+    res = await run_process([path, "-version"], timeout=20)
+    version = _parse_version((res.stdout + b"\n"
+                              + res.stderr).decode(errors="ignore"))
     return ToolStatus(spec.name, spec.required, True, spec.install_kind,
                       version=version, install_status="present",
                       verified=True)

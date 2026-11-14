@@ -219,7 +219,7 @@ class VulnEngine:
         version = self._template_version(upd)
         if version:
             res.data["templates_version"] = version
-        print(f"[+] nuclei template-ləri yeniləndi"
+        print("[+] nuclei template-ləri yeniləndi"
               + (f" ({version})" if version else ""))
 
     @staticmethod

@@ -17,6 +17,7 @@ sorğu göndərilmir — yalnız sətir müqayisəsi aparılır.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import aiohttp
 
@@ -25,6 +26,8 @@ from ..http_policy import TargetBlocked
 from ..parallel import concurrency_limit, run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
+
+_log = logging.getLogger("qbh.takeover")
 
 MAX_HOSTS = 300
 CONFIRM_CONF = 0.85
@@ -71,12 +74,19 @@ def match_provider(cnames: list[str]) -> tuple[str, str, tuple[str, ...]] | None
 def default_cname_resolver(host: str) -> list[str]:
     """dnspython ilə hostun CNAME qeydlərini oxuyur (yoxdursa boş)."""
     try:
+        import dns.exception
         import dns.resolver
-    except Exception:  # noqa: BLE001 - paket yoxdursa dürüst boş
+    except ImportError:
+        # Paket yoxdursa dürüst şəkildə boş qaytar (uydurma yoxdur).
+        _log.debug("takeover: dnspython yoxdur — CNAME resolver boş qaytarır")
         return []
     try:
         answer = dns.resolver.resolve(host, "CNAME", lifetime=5.0)
-    except Exception:  # noqa: BLE001 - NXDOMAIN/NoAnswer/timeout
+    except dns.exception.DNSException as exc:
+        # Yalnız DNS səviyyəli şərtlər (NXDOMAIN/NoAnswer/timeout) udulur.
+        # Digər (proqramlaşdırma) xətalar GİZLƏDİLMİR.
+        _log.debug("takeover: CNAME sorğusu uğursuz (%s): %s: %s",
+                   host, type(exc).__name__, exc)
         return []
     out: list[str] = []
     for rr in answer:

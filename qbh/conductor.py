@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import traceback
 
@@ -53,6 +54,8 @@ from .metrics import ScanMetrics
 from .report import generator
 from .results import EngineResult, StageResult, now_iso
 from .scope import ScopeError
+
+_log = logging.getLogger("qbh.conductor")
 
 
 class PipelineAbort(RuntimeError):
@@ -183,11 +186,16 @@ class Conductor:
             sr.status = "cancelled"
             sr.completed_at = now_iso()
             sr.duration = round(time.monotonic() - t0, 3)
+            _log.warning("stage ləğv edildi: scan_id=%s engine=%s host=%s",
+                         self.scan_id, stage, target or "-")
             self._record(sr)
             raise
         except Exception as exc:  # noqa: BLE001 - sərhəddə tutulur və raportlanır
             sr.status = "failed"
             sr.errors.append(f"{type(exc).__name__}: {exc}")
+            # Strukturlaşdırılmış log: yalnız TİP (mesaj/məzmun YOX).
+            _log.error("stage uğursuz: scan_id=%s engine=%s host=%s exc=%s",
+                       self.scan_id, stage, target or "-", type(exc).__name__)
             print(f"   [✗] {label} xətası: {type(exc).__name__}: {exc}")
             traceback.print_exc()
         else:

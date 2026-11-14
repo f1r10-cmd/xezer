@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import re
+import sqlite3
 import time
 
 import aiohttp
@@ -26,6 +28,8 @@ from ..redact import redact
 from ..results import EngineResult
 from ..scope import ScopeError
 from .offensive import OffensiveEngine
+
+_log = logging.getLogger("qbh.jwt")
 
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}")
 WEAK_ALGS = {"none", "None", "NONE"}
@@ -95,7 +99,11 @@ class JWTEngine(OffensiveEngine):
                 "ON h.id=s.host_id WHERE h.scan_id=? AND "
                 "(s.kind LIKE '%jwt%' OR s.kind LIKE '%token%') LIMIT 20",
                 (db.effective_scan_id(self.ctx.scan_id),)).fetchall()
-        except Exception:  # noqa: BLE001 — köhnə bazada cədvəl yoxdursa
+        except sqlite3.Error as exc:
+            # Yalnız DB səviyyəli xəta gözlənilir (məs. köhnə bazada cədvəl
+            # yoxdursa). Digər xətalar GİZLƏDİLMİR → yuxarı ötürülür.
+            _log.debug("jwt: secrets cədvəli oxunmadı: %s: %s",
+                       type(exc).__name__, exc)
             return []
         toks = []
         for row in rows:

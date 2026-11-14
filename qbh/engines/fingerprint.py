@@ -13,9 +13,12 @@ Prinsiplər:
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import re
 
+import aiohttp
 import yaml
 
 from .. import db
@@ -24,6 +27,8 @@ from ..parallel import concurrency_limit, run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
 from ..service_url import ServiceResolver, failure_label
+
+_log = logging.getLogger("qbh.fingerprint")
 
 STRATEGY_DIR = "config/strategies"
 
@@ -132,7 +137,6 @@ class FingerprintEngine:
             if self.guardian:
                 r = await self.guardian.get(session, url, allow_redirects=True)
             else:  # pragma: no cover - guardian həmişə verilir
-                import aiohttp
                 async with session.get(
                         url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     return resp.status, dict(resp.headers), \
@@ -140,7 +144,13 @@ class FingerprintEngine:
             return r.status, r.headers, r.text[:400_000]
         except TargetBlocked:
             raise
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError,
+                ScopeError) as exc:
+            # Yalnız GÖZLƏNİLƏN şəbəkə/scope xətaları udulur və loglanır.
+            # Proqramlaşdırma xətaları (məs. AttributeError) YUXARI ötürülür →
+            # səssizcə "nəticə yoxdur"a çevrilmir.
+            _log.debug("fingerprint HTTP uğursuz (%s): %s: %s",
+                       url, type(exc).__name__, exc)
             return None, {}, ""
 
     # ---------------- aşkarlama ----------------

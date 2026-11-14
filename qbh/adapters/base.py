@@ -71,8 +71,22 @@ def limited_wordlist(path: str, cap: int) -> tuple[str, str | None]:
     if len(lines) <= cap:
         return path, None
     fd, tmp = tempfile.mkstemp(prefix="qbh_wl_", suffix=".txt")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines[:cap]))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines[:cap]))
+    except BaseException:
+        # `os.fdopen`/write uğursuz olsa fayl deskriptoru açıq qala bilər və
+        # müvəqqəti fayl yerində qalır. Çağıran `tmp`-i HƏLƏ almamışdır →
+        # təmizləməni BURADA etmək lazımdır (əks halda sızma olur).
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return tmp, tmp
 
 
@@ -234,6 +248,11 @@ async def run_process(cmd: list[str], *, stdin: bytes | None = None,
     finally:
         if killer is not None:
             killer.cancel()
+            # Watcher task-ın FAKTİKİ bitməsini gözlə — "Task was destroyed
+            # but it is pending" sızmasının qarşısını alır. Burada bizim
+            # tətiklədiyimiz ləğv udulur; cari task ləğv olunursa `gather`
+            # yenə `CancelledError` qaldırır → yuxarı ötürülür (udulmur).
+            await asyncio.gather(killer, return_exceptions=True)
     return ProcResult(proc.returncode or 0, out or b"", err or b"")
 
 

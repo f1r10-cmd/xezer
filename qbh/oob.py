@@ -32,6 +32,12 @@ from aiohttp import web
 DEFAULT_WAIT = 20.0
 DEFAULT_POLL = 1.0
 
+#: Gözləmə müddətinin YUXARI həddi — konfiqurasiyadan gələn hədsiz dəyər
+#: skanı qeyri-müəyyən müddət bloklamasın.
+MAX_WAIT = 300.0
+#: Sorğu intervalının AŞAĞI həddi — sıfır/çox kiçik dəyər busy-loop yaratmasın.
+MIN_POLL = 0.01
+
 
 @dataclass
 class OOBHit:
@@ -179,7 +185,15 @@ class OOBManager:
 
     async def wait_for(self, token: str, *, timeout: float = DEFAULT_WAIT,
                        interval: float = DEFAULT_POLL) -> bool:
-        """Token üçün callback-i gözləyir (loopback testləri üçün faydalı)."""
+        """Token üçün callback-i gözləyir (loopback testləri üçün faydalı).
+
+        `timeout` [0, `MAX_WAIT`] aralığına, `interval` isə `MIN_POLL`-dan
+        aşağı olmayan dəyərə MƏHDUDLAŞDIRILIR → hədsiz gözləmə və busy-loop
+        mümkün deyil. `asyncio.sleep` ləğv zamanı `CancelledError` qaldırır
+        (udulmur).
+        """
+        timeout = max(0.0, min(float(timeout), MAX_WAIT))
+        interval = max(MIN_POLL, float(interval))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.confirmed(token):

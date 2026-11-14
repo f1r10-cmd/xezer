@@ -22,6 +22,7 @@ Scope qapısı burada heç vaxt keçilə bilməz — yalnız İCAZƏLİ hədəfl
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -32,6 +33,21 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 
 from .scope import ScopeEnforcer, ScopeError, extract_host
+
+#: Retry backoff-u üçün maksimum ƏLAVƏ jitter nisbəti.
+#: Jitter YALNIZ gecikmə ƏLAVƏ edir (aşağı salmır) → təkrar cəhdlər heç vaxt
+#: sürətlənmir və sorğu dərəcəsi ARTIRILMIR.
+RETRY_JITTER_RATIO = 0.25
+
+
+def backoff_delay(attempt: int, base: float) -> float:
+    """`attempt`-ci (1-dən başlayan) uğursuz cəhddən sonra gözləmə müddəti.
+
+    `base * 2**(attempt-1)` + bounded jitter. Jitter toplama xarakterlidir →
+    nəticə heç vaxt xam eksponensial dəyərdən AŞAĞI olmur (rate artımı yox).
+    """
+    delay = max(0.0, float(base)) * (2 ** max(0, int(attempt) - 1))
+    return delay + delay * RETRY_JITTER_RATIO * random.random()
 
 
 class TargetBlocked(RuntimeError):
@@ -346,7 +362,7 @@ class HttpPolicy:
                 attempt += 1
                 if attempt > max_tries:
                     raise
-                await asyncio.sleep(self.backoff_base * (2 ** (attempt - 1)))
+                await asyncio.sleep(backoff_delay(attempt, self.backoff_base))
                 continue
 
             # Redirect-ləri ÖZÜMÜZ idarə edirik — hər addım scope yoxlanılır

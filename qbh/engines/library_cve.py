@@ -15,14 +15,19 @@ Bu mənbələr (OSV/KEV/EPSS) SKAN HƏDƏFİ DEYİL → onlara scope tətbiq olu
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 import aiohttp
 
 from .. import db
+from ..http_policy import TargetBlocked
 from ..redact import redact
 from ..results import EngineResult
+from ..scope import ScopeError
 from .cve_intel import get_kev, rank_batch
+
+_log = logging.getLogger("qbh.library_cve")
 
 OSV_URL = "https://api.osv.dev/v1/query"
 MAX_JS = 60
@@ -89,7 +94,6 @@ class LibraryCVEEngine:
 
         # 1) kitabxanaları topla
         libs: dict[tuple[int, str], dict[str, str]] = {}
-        import aiohttp
         async with aiohttp.ClientSession() as session:
             for row in rows:
                 if not self.cfg.in_scope(row["url"]) or not self.guardian:
@@ -115,7 +119,13 @@ class LibraryCVEEngine:
     async def _fetch(self, session, url: str, host: str) -> str | None:
         try:
             r = await self.guardian.get(session, url, allow_redirects=True)
-        except Exception:  # noqa: BLE001 — guardian blok/scope xətası
+        except (TargetBlocked, ScopeError, aiohttp.ClientError,
+                asyncio.TimeoutError, OSError) as exc:
+            # Yalnız GÖZLƏNİLƏN operativ şərtlər udulur və loglanır; digər
+            # (proqramlaşdırma) xətalar yuxarı ötürülür → səssiz "nəticə yoxdur"
+            # ilə qarışdırılmır.
+            _log.debug("library_cve fetch uğursuz (%s): %s: %s",
+                       url, type(exc).__name__, exc)
             return None
         if r.status != 200:
             return None

@@ -227,14 +227,21 @@ class ReconEngine:
 
         outcomes = await run_bounded(targets, _one, limit=limit)
         missing = False
+        timed_out = False
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 res.warn(f"naabu: gözlənilməz xəta — {outcome}")
                 continue
-            h, ports = outcome
+            h, (ports, was_timeout) = outcome
             if ports is None:            # naabu yoxdur → dürüst xəbərdarlıq
                 missing = True
                 continue
+            if was_timeout:
+                # Timeout "açıq port yoxdur" DEYİL — dürüst bildirilir ki,
+                # natamam nəticə tam kimi təqdim olunmasın.
+                timed_out = True
+                res.mark_partial(
+                    f"{h['host']}: naabu timeout — port nəticələri natamamdır")
             if ports:
                 db.insert_finding(
                     h["id"], "recon", "info",
@@ -246,25 +253,32 @@ class ReconEngine:
                 res.findings += 1
         if missing:
             self._warn_missing(res, "naabu", "port taraması atlandı")
+        if timed_out:
+            res.warn("naabu: bəzi hostlarda port taraması timeout ilə natamam qaldı")
 
     @staticmethod
-    async def _naabu_scan(target: str, rate: int = 30) -> list[str] | None:
-        """Açıq portları qaytarır; alət yoxdursa `None` (boş siyahıdan fərqli)."""
+    async def _naabu_scan(target: str,
+                          rate: int = 30) -> tuple[list[str] | None, bool]:
+        """Açıq portları qaytarır.
+
+        Qaytarır: `(ports, timed_out)`. `ports is None` → alət YOXDUR (boş
+        siyahıdan FƏRQLİ). `timed_out=True` → nəticə natamamdır; `run_process`
+        tərəfindən yığılan qismən çıxış yenə də parse olunur ki, əlçatan portlar
+        İTİRİLMƏSİN.
+        """
         r = await run_process(
             ["naabu", "-host", target, "-top-ports", "100",
              "-rate", str(max(1, int(rate))), "-silent",
              "-json", "-no-color"], timeout=180)
         if r.missing:
-            return None
-        if r.timed_out:
-            return []
+            return None, False
         ports: set[str] = set()
         for line in r.stdout.decode(errors="ignore").splitlines():
             try:
                 ports.add(str(json.loads(line).get("port")))
             except (json.JSONDecodeError, TypeError):
                 continue
-        return sorted(p for p in ports if p and p != "None")
+        return sorted(p for p in ports if p and p != "None"), r.timed_out
 
     async def _crawl(self, alive: list[dict], res: EngineResult):
         # Əvvəlcə cooldown yoxlaması + URL-i olan hostların seçimi (deterministik).

@@ -80,5 +80,10 @@ async def run_bounded(
     except asyncio.CancelledError:
         for task in workers:
             task.cancel()
+        # İşçilərin FAKTİKİ bitməsini gözlə — "Task was destroyed but it is
+        # pending" sızmasının və yarımçıq `results` yazısının qarşısını alır.
+        # `return_exceptions=True`: ləğv olunmuş işçilərin `CancelledError`-u
+        # burada udulur, amma aşağıdakı `raise` ilə yuxarıya yenə yayılır.
+        await asyncio.gather(*workers, return_exceptions=True)
         raise
     return results

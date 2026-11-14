@@ -20,7 +20,7 @@ from .scope import ScopeEnforcer, ScopeError, normalize_host
 KNOWN_TOP_KEYS = {
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
-    "oob", "stealth", "vault",
+    "oob", "stealth", "vault", "vuln",
 }
 
 #: Faza 2 — stealth qatının strateji variantları.
@@ -151,6 +151,23 @@ class VaultConfig:
 
 
 @dataclass
+class VulnConfig:
+    """M3 Nuclei template seçimi (hər üç açar default OFF — ən mühafizəkar).
+
+    * `allow_all_templates` — `-tags` filtrini buraxıb bütün template-ləri
+      işlədir (scope/RoE və `-exclude-tags` hələ də tətbiq olunur).
+    * `allow_destructive` — RoE icazəsi ilə YALNIZ qeyri-zərərli intrusiv
+      kateqoriyaları (`intrusive`, `default-login`, `file-upload`, `rce-oob`)
+      açır; DoS/brute-force/creds-stuffing HƏMİŞƏ istisna qalır.
+    * `update_templates` — skandan əvvəl `nuclei -update-templates` işlədir.
+    """
+
+    allow_all_templates: bool = False
+    allow_destructive: bool = False
+    update_templates: bool = False
+
+
+@dataclass
 class ProgramRules:
     """Rules of Engagement — proqramın qadağaları."""
     forbidden: set[str] = field(default_factory=set)
@@ -177,6 +194,7 @@ class Config:
     oob: OOBConfig = field(default_factory=OOBConfig)
     stealth: StealthConfig = field(default_factory=StealthConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
+    vuln: VulnConfig = field(default_factory=VulnConfig)
     program_rules: ProgramRules = field(default_factory=ProgramRules)
     warnings: list[str] = field(default_factory=list)
     _raw: dict = field(default_factory=dict)
@@ -245,13 +263,14 @@ class Config:
         oob = cls._validate_oob(raw.get("oob"), aggressiveness)
         stealth = cls._validate_stealth(raw.get("stealth"), aggressiveness)
         vault = cls._validate_vault(raw.get("vault"), warnings)
+        vuln = cls._validate_vuln(raw.get("vuln"), warnings)
 
         return cls(
             path=path, program=program, nvd_api_key=nvd_key, scope=scope,
             limits=limits, proxy_file=proxy_file, interface=interface,
             aggressiveness=aggressiveness, rotation=rotation,
             block_strategy=block_strategy, chain=chain, oob=oob,
-            stealth=stealth, vault=vault,
+            stealth=stealth, vault=vault, vuln=vuln,
             program_rules=program_rules, warnings=warnings, _raw=raw,
         )
 
@@ -518,6 +537,29 @@ class Config:
             if not isinstance(vault["key_file"], str):
                 raise ConfigError("vault.key_file mətn olmalıdır")
             cfg.key_file = vault["key_file"].strip()
+        return cfg
+
+    @staticmethod
+    def _validate_vuln(vuln, warnings: list[str]) -> VulnConfig:
+        """`vuln` bölməsini validasiya edir (default: hamısı OFF).
+
+        Hər üç açar CİDDİ boolean olmalıdır — `"true"` (mətn) və `1` (tam ədəd)
+        qəbul EDİLMİR. Açarlar verilməzsə köhnə davranış DƏYİŞMİR.
+        """
+        cfg = VulnConfig()
+        if vuln is None:
+            return cfg
+        if not isinstance(vuln, dict):
+            raise ConfigError("vuln mapping olmalıdır")
+        keys = ("allow_all_templates", "allow_destructive", "update_templates")
+        for key in vuln:
+            if key not in keys:
+                warnings.append(f"naməlum vuln açarı: {key!r}")
+        for key in keys:
+            if key in vuln and vuln[key] is not None:
+                if not isinstance(vuln[key], bool):
+                    raise ConfigError(f"vuln.{key} boolean olmalıdır")
+                setattr(cfg, key, vuln[key])
         return cfg
 
     # ---------------- köməkçilər ----------------

@@ -105,12 +105,32 @@ chain:
 
 antiblock:
   interface: "eth0"
+
+# M3 Nuclei template seçimi — hər üçü DEFAULT OFF (ən mühafizəkar).
+vuln:
+  allow_all_templates: false    # true → `-tags` filtri buraxılır (bütün template-lər)
+  allow_destructive: false      # true → RoE icazəsi ilə qeyri-zərərli intrusiv kateqoriyalar
+  update_templates: false       # true → skandan əvvəl `nuclei -update-templates`
 ```
 
 **Validasiya qaydaları:** boş/xətalı `scope` HEÇ VAXT qəbul edilmir; rəqəmsal
 limitlər aralıq yoxlanılır; `aggressiveness` yalnız `passive|normal|aggressive`
-ola bilər; naməlum açarlar və silinmiş köhnə evasion açarları (`rotate_levels`,
+ola bilər; `vuln.*` açarları CİDDİ boolean olmalıdır (`"true"`/`1` rədd olunur);
+naməlum açarlar və silinmiş köhnə evasion açarları (`rotate_levels`,
 `credits`) barədə xəbərdarlıq verilir.
+
+### Nuclei template konfiqurasiyası (`vuln`)
+
+| Açar | Default | Effekt |
+|---|---|---|
+| `allow_all_templates` | `false` | `true` → `-tags` filtri **buraxılır** (boş filtr göndərilmir); bütün template-lər işlədilir, `-exclude-tags` scope/RoE məhdudiyyətini qoruyur. |
+| `allow_destructive` | `false` | `true` → RoE (`program_rules.forbidden`) icazə verdikdə YALNIZ qeyri-zərərli intrusiv kateqoriyalar açılır: `intrusive`, `default-login`, `file-upload`, `rce-oob`. **DoS, `fuzz`/`fuzzing`, brute-force, creds-stuffing HƏMİŞƏ istisna qalır.** |
+| `update_templates` | `false` | `true` → skandan əvvəl `nuclei -update-templates` icra olunur; çıxış kodu yoxlanılır, uğursuzluq açıq raportlanır və versiya diaqnostikaya yazılır. |
+
+`allow_destructive` heç vaxt təkbaşına dağıdıcı template-ləri açmır: proqram
+`intrusive_templates`-i qadağan edibsə (`program_rules.forbidden`), seçim heç
+bir şeyi dəyişmir. `aggressive` profilində `intrusive_templates` artıq aktivdir,
+buna görə `allow_destructive` əlavə effekt vermir.
 
 ### Aggressiveness profilləri
 

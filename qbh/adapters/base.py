@@ -91,6 +91,40 @@ class ProcResult:
                 and not self.missing and not self.blocked)
 
 
+#: Timeout/ləğvdən sonra natamam çıxışın yığılması üçün grace müddəti (saniyə).
+_PARTIAL_DRAIN_GRACE = 5.0
+
+
+def _cancel_task(task: "asyncio.Future") -> None:
+    """Asılı qalmış reader task-ını ləğv edir (təmizləmə ən yaxşı səy)."""
+    try:
+        task.cancel()
+    except Exception:  # noqa: BLE001 - təmizləmə heç vaxt atmasın
+        pass
+
+
+async def _drain_partial(comm: "asyncio.Future") -> tuple[bytes, bytes]:
+    """Öldürülmüş prosesdən sonra ƏLÇATAN natamam çıxışı yığır.
+
+    `comm` — `Process.communicate()` task-ıdır. Proses (qrupu) öldürüldükdən
+    sonra kanallar bağlanır və task NATAMAM stdout/stderr ilə tamamlanır →
+    qismən nəticə İTİRİLMİR. Uşaq proses kanalı açıq saxlayıbsa
+    `_PARTIAL_DRAIN_GRACE` saniyə sonra task ləğv olunur (asılı qalma yoxdur).
+    """
+    try:
+        out, err = await asyncio.wait_for(asyncio.shield(comm),
+                                         _PARTIAL_DRAIN_GRACE)
+        return out or b"", err or b""
+    except asyncio.TimeoutError:
+        _cancel_task(comm)
+        return b"", b""
+    except asyncio.CancelledError:
+        _cancel_task(comm)
+        raise
+    except Exception:  # noqa: BLE001 - natamam çıxış ən yaxşı səy
+        return b"", b""
+
+
 def kill_process_group(proc: asyncio.subprocess.Process,
                        sig: int | None = None) -> None:
     """Prosesi və BÜTÖV proses qrupunu öldürür (Faza 0.2).
@@ -173,15 +207,29 @@ async def run_process(cmd: list[str], *, stdin: bytes | None = None,
             kill_process_group(proc)
         killer = asyncio.create_task(_watch())
 
+    # `communicate` AYRI task kimi işlədilir və `shield` ilə qorunur: timeout və
+    # ya ləğv zamanı bu task ləğv OLUNMUR → proses (qrupu) öldükdən sonra kanallar
+    # bağlanır və task NATAMAM stdout/stderr ilə tamamlanır. Beləliklə qismən
+    # çıxış İTİRİLMİR (əvvəlki `wait_for(proc.communicate(...))` onu atırdı).
+    comm = asyncio.ensure_future(proc.communicate(stdin))
     try:
-        out, err = await asyncio.wait_for(proc.communicate(stdin), timeout)
+        out, err = await asyncio.wait_for(asyncio.shield(comm), timeout)
     except asyncio.TimeoutError:
         kill_process_group(proc)
         await proc.wait()
-        return ProcResult(-1, timed_out=True)
+        out, err = await _drain_partial(comm)
+        return ProcResult(-1, out, err, timed_out=True)
     except asyncio.CancelledError:
         kill_process_group(proc)
-        await proc.wait()
+        try:
+            await proc.wait()
+        except asyncio.CancelledError:
+            pass
+        # Ən yaxşı səy: natamam çıxışı yığ, sonra ləğvi ötür.
+        try:
+            await _drain_partial(comm)
+        except BaseException:  # noqa: BLE001 - əsas ləğv siqnalı aşağı ötürülür
+            _cancel_task(comm)
         raise
     finally:
         if killer is not None:

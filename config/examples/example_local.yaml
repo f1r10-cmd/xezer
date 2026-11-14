@@ -56,3 +56,10 @@ oob:
 
 antiblock:
   interface: "lo"
+
+# M3 Nuclei template seçimi — HƏR ÜÇÜ DEFAULT OFF (ən mühafizəkar davranış).
+# Dəyərlər CİDDİ boolean olmalıdır: "true" (mətn) və ya 1 (rəqəm) QƏBUL EDİLMİR.
+vuln:
+  allow_all_templates: false    # true → `-tags` filtri buraxılır (bütün template-lər)
+  allow_destructive: false      # true → RoE icazəsi ilə qeyri-zərərli intrusiv kateqoriyalar
+  update_templates: false       # true → skandan əvvəl `nuclei -update-templates`

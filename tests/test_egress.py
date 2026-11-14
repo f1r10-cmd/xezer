@@ -165,6 +165,56 @@ class TestProcessKill:
         assert res.timed_out is True
         assert time.monotonic() - t0 < 10
 
+    async def test_timeout_preserves_partial_stdout(self):
+        """Timeout zamanı artıq yazılmış stdout İTİRİLMƏMƏLİDİR.
+
+        Tarixi qüsur: `wait_for(proc.communicate())` timeout-da BÜTÜN çıxışı
+        atırdı → qismən nuclei nəticələri bərpa oluna bilmirdi.
+        """
+        code = ("import sys,time\n"
+                "sys.stdout.write('{\"partial\":true}\\n')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(30)\n")
+        res = await run_process([sys.executable, "-c", code], timeout=0.8)
+        assert res.timed_out is True
+        assert b'"partial":true' in res.stdout
+
+    async def test_timeout_preserves_partial_stderr(self):
+        code = ("import sys,time\n"
+                "sys.stderr.write('partial-stderr-here\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(30)\n")
+        res = await run_process([sys.executable, "-c", code], timeout=0.8)
+        assert res.timed_out is True
+        assert b"partial-stderr-here" in res.stderr
+
+    async def test_task_cancel_propagates_and_kills(self):
+        """Xarici ləğv (`task.cancel`) `CancelledError` ötürməli və prosesi
+        öldürməlidir (asılı qalmış uşaq YOX)."""
+        task = asyncio.ensure_future(run_process(
+            [sys.executable, "-c", "import time; time.sleep(30)"], timeout=30))
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX proses qrupu tələb edir (Windows-də yoxdur)")
+    async def test_timeout_kills_child_process_group(self, tmp_path):
+        """Timeout BÜTÖV proses qrupunu öldürür — uşaq proses qalmır."""
+        marker = tmp_path / "child_on_timeout.txt"
+        child_code = (
+            "import time,pathlib; time.sleep(1.5);"
+            f"pathlib.Path({str(marker)!r}).write_text('alive')")
+        parent_code = (
+            "import subprocess,sys,time\n"
+            f"subprocess.Popen([sys.executable,'-c',{child_code!r}])\n"
+            "time.sleep(30)\n")
+        res = await run_process([sys.executable, "-c", parent_code], timeout=0.5)
+        assert res.timed_out is True
+        await asyncio.sleep(2.0)
+        assert not marker.exists()
+
     async def test_cancel_event_kills(self):
         ev = asyncio.Event()
         asyncio.get_running_loop().call_later(0.3, ev.set)

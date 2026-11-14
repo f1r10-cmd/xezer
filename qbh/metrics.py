@@ -193,3 +193,134 @@ class ScanMetrics:
             "aiohttp_requests": self.aiohttp_requests,
             "transport_requests": self.transport_requests,
         }
+
+
+# --------------------------------------------------------------------------- #
+# Orkestrasiya metrikaları (Faza 6) — URL / tapşırıq / zəncir / mühərrik
+# --------------------------------------------------------------------------- #
+#: Tapşırıq metrikalarının sabit açar dəsti (boş dəyərlər də göstərilir).
+TASK_KEYS = ("considered", "queued", "deduplicated", "executed", "completed",
+             "partial", "failed", "timed_out", "cancelled", "retried",
+             "skipped", "pending")
+
+#: Zəncir metrikalarının sabit açar dəsti.
+CHAIN_KEYS = ("emitted", "received", "duplicate", "conditions_rejected",
+              "cyclic", "scheduled", "scheduled_tasks", "suppressed")
+
+
+class OrchestrationMetrics:
+    """Skan- və mühərrik-əsaslı orkestrasiya sayğacları.
+
+    Uydurma faiz/qalan-vaxt YOXDUR — yalnız FAKTİKİ saylar. Bütün sahələr
+    bounded-dır (Counter/dict); URL gövdələri və ya tam URL saxlanılmır.
+    """
+
+    def __init__(self):
+        # --- URL metrikaları ---
+        self.urls_raw = 0
+        self.urls_unique = 0
+        self.urls_duplicate = 0
+        self.endpoint_families = 0
+        self.urls_by_category: Counter = Counter()
+
+        # --- uyğunluq (mühərrik-əsaslı) ---
+        self.eligible: Counter = Counter()
+        self.excluded: Counter = Counter()
+        self.deferred: Counter = Counter()
+        self.exclusion_reasons: Counter = Counter()
+
+        # --- tapşırıq ---
+        self.tasks: Counter = Counter({k: 0 for k in TASK_KEYS})
+        self.peak_queue = 0
+        self.peak_concurrency = 0
+        self.backpressure_events = 0
+
+        # --- zəncir ---
+        self.chain: Counter = Counter({k: 0 for k in CHAIN_KEYS})
+
+        # --- mühərrik ---
+        self.engines: dict[str, dict] = {}
+
+    # ------------------------------------------------------------------- URL
+    def record_url_intake(self, intake) -> None:
+        """`urlintel.UrlIntake` nəticəsini qeyd edir (TƏK çağırış)."""
+        self.urls_raw = int(intake.raw)
+        self.urls_unique = int(intake.unique)
+        self.urls_duplicate = int(intake.duplicates)
+        self.endpoint_families = int(intake.families)
+        self.urls_by_category = Counter(intake.by_category)
+
+    # -------------------------------------------------------------- eligibility
+    def record_plan(self, plan) -> None:
+        """`urlintel.UrlPlan` (mühərrik planı) nəticəsini qeyd edir."""
+        eng = plan.engine or "?"
+        self.eligible[eng] += int(plan.eligible)
+        self.excluded[eng] += int(plan.excluded)
+        self.deferred[eng] += int(plan.deferred)
+        for d in plan.excluded_details:
+            self.exclusion_reasons[d.reason] += 1
+
+    # -------------------------------------------------------------- queue
+    def record_queue_depth(self, depth: int) -> None:
+        if depth > self.peak_queue:
+            self.peak_queue = int(depth)
+
+    def record_concurrency(self, current: int) -> None:
+        if current > self.peak_concurrency:
+            self.peak_concurrency = int(current)
+
+    def record_backpressure(self) -> None:
+        self.backpressure_events += 1
+
+    # -------------------------------------------------------------- tasks/chain
+    def record_task_stats(self, stats: dict) -> None:
+        for key in TASK_KEYS:
+            if key in stats:
+                self.tasks[key] = int(stats[key])
+        if "executed" not in stats and "started" in stats:
+            self.tasks["executed"] = int(stats["started"])
+
+    def record_chain_stats(self, stats: dict) -> None:
+        for key in CHAIN_KEYS:
+            if key in stats:
+                self.chain[key] = int(stats[key])
+
+    # -------------------------------------------------------------- engine
+    def record_engine(self, name: str, **counters) -> None:
+        """Mühərrik sayğaclarını TOPLAYIR (input, eligible, skipped, requests...)."""
+        bucket = self.engines.setdefault(name, {
+            "input_urls": 0, "eligible_urls": 0, "skipped_urls": 0,
+            "deferred_urls": 0, "params_processed": 0, "requests": 0,
+            "findings": 0, "validated": 0, "duration": 0.0,
+        })
+        for key, value in counters.items():
+            if key == "duration":
+                bucket["duration"] = round(bucket["duration"] + float(value), 3)
+            else:
+                bucket[key] = bucket.get(key, 0) + int(value)
+
+    # --------------------------------------------------------------- snapshot
+    def snapshot(self) -> dict:
+        return {
+            "urls": {
+                "raw": self.urls_raw,
+                "unique": self.urls_unique,
+                "duplicate": self.urls_duplicate,
+                "families": self.endpoint_families,
+                "by_category": dict(sorted(self.urls_by_category.items())),
+            },
+            "eligibility": {
+                "eligible": dict(sorted(self.eligible.items())),
+                "excluded": dict(sorted(self.excluded.items())),
+                "deferred": dict(sorted(self.deferred.items())),
+                "exclusion_reasons": dict(sorted(self.exclusion_reasons.items())),
+            },
+            "tasks": dict(sorted(self.tasks.items())),
+            "queue": {
+                "peak_queue": self.peak_queue,
+                "peak_concurrency": self.peak_concurrency,
+                "backpressure_events": self.backpressure_events,
+            },
+            "chain": dict(sorted(self.chain.items())),
+            "engines": {k: dict(v) for k, v in sorted(self.engines.items())},
+        }

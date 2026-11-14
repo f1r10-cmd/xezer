@@ -17,6 +17,7 @@ import time
 import traceback
 
 from . import db
+from .adaptive import AdaptiveController
 from .antiblock.guardian import Guardian
 from .antiblock.identity import IdentityManager
 from .antiblock.proxymanager import ProxyManager
@@ -50,10 +51,12 @@ from .engines.wafdetect import WafDetectEngine
 from .engines.xss import XSSEngine
 from .http_policy import HttpPolicy
 from .installer import check_tools, format_report, install_tools
-from .metrics import ScanMetrics
+from .metrics import OrchestrationMetrics, ScanMetrics
 from .report import generator
 from .results import EngineResult, StageResult, now_iso
+from .scheduler import SchedTask, Scheduler
 from .scope import ScopeError
+from .tasks import EventLedger, TaskLedger, task_identity
 
 _log = logging.getLogger("qbh.conductor")
 
@@ -111,6 +114,19 @@ class Conductor:
         self.ctx = Context(cfg=cfg, args=args, guardian=self.guardian,
                            scan_id=None, authorization=self.authorization,
                            metrics=self.metrics)
+        # Faza 3-6 (§7-§10): orkestrasiya komponentləri — skan boyu TƏK nüsxə.
+        # Idempotentlik/hadisə dəftərləri, adaptiv nəzarət və orkestrasiya
+        # metrikaları bütün mühərriklər tərəfindən `ctx` vasitəsilə paylaşılır.
+        self.orchestration = OrchestrationMetrics()
+        self.task_ledger = TaskLedger(max_attempts=3)
+        self.event_ledger = EventLedger(
+            max_depth=int(getattr(cfg.chain, "max_depth", 3) or 3))
+        self.adaptive = AdaptiveController(ledger=self.task_ledger,
+                                           metrics=self.orchestration)
+        self.ctx.orchestration = self.orchestration
+        self.ctx.task_ledger = self.task_ledger
+        self.ctx.event_ledger = self.event_ledger
+        self.ctx.adaptive = self.adaptive
         # Faza 2.1: hədəfə gedən native HTTP trafiki TLS təqlidi transportundan
         # keçir (curl_cffi yoxdursa transport `available=False` → aiohttp).
         self.policy.transport = self.ctx.stealth.transport
@@ -232,6 +248,34 @@ class Conductor:
         except Exception as exc:  # noqa: BLE001
             print(f"   [!] stage qeydə alına bilmədi: {exc}")
 
+    # ---------------- bounded parallel stage runner (Faza 4) ----------------
+    async def _run_parallel(self, specs: list[tuple]) -> None:
+        """Müstəqil mərhələləri MƏRKƏZLƏŞDİRİLMİŞ məhdud planlaşdırıcı ilə icra edir.
+
+        `Scheduler` worker sayını, qlobal və host-əsaslı concurrency-ni
+        məhdudlaşdırır; bir mərhələnin xətası digərlərinə YAYILMIR və `aclose()`
+        bütün işçiləri ləğv edib faktiki bitməsini gözləyir (Task sızması yox).
+        Nəticələr `_run_stage` daxilində qeyd olunur (sıra = tamamlanma sırası).
+        """
+        lim = self.cfg.limits
+        per_host = getattr(lim, "per_host_concurrency", None) or 0
+        global_cap = int(self.cfg.effective_concurrency)
+        sched = Scheduler(
+            workers=max(1, min(len(specs), global_cap)),
+            global_limit=global_cap,
+            per_host_limit=int(per_host),
+            ledger=self.task_ledger,
+            metrics=self.orchestration)
+        self.ctx.scheduler = sched
+        async with sched:
+            for stage, factory in specs:
+                identity = task_identity(self.scan_id, stage, stage,
+                                         test_type="stage")
+                await sched.submit(SchedTask(
+                    identity=identity, engine=stage, host="",
+                    run=lambda st=stage, f=factory: self._run_stage(st, "", f)))
+            await sched.drain()
+
     # ---------------- mərhələ boru xətləri ----------------
     async def run_recon(self) -> None:
         targets = self.resolve_targets()
@@ -270,12 +314,12 @@ class Conductor:
         await self._run_stage("takeover", "",
                               lambda: TakeoverEngine(self.ctx).run())
 
-        await asyncio.gather(
-            self._run_stage("vuln", "", lambda: VulnEngine(self.ctx).run()),
-            self._run_stage("js", "", lambda: JSAnalysisEngine(self.ctx).run()),
-            self._run_stage("content", "", lambda: ContentEngine(self.ctx).run()),
-            self._run_stage("ferox", "", lambda: FeroxEngine(self.ctx).run()),
-        )
+        await self._run_parallel([
+            ("vuln", lambda: VulnEngine(self.ctx).run()),
+            ("js", lambda: JSAnalysisEngine(self.ctx).run()),
+            ("content", lambda: ContentEngine(self.ctx).run()),
+            ("ferox", lambda: FeroxEngine(self.ctx).run()),
+        ])
 
         await self._run_stage("api_enum", "",
                               lambda: APIEnumEngine(self.ctx).run())
@@ -329,6 +373,15 @@ class Conductor:
 
     # ---------------- yekun ----------------
     def generate_report(self) -> str | None:
+        # Faza 6 (§10): hesabat anındakı URL/tapşırıq/zəncir sayğaclarını sinxronla.
+        try:
+            from . import urlintel
+
+            urlintel.record_intake(self.ctx)
+            self.orchestration.record_task_stats(self.task_ledger.snapshot())
+            self.orchestration.record_chain_stats(self.event_ledger.snapshot())
+        except Exception:  # noqa: BLE001 - metrikalar hesabatı bloklamamalıdır
+            pass
         try:
             path = generator.generate(
                 severity_min=self.args.severity,
@@ -347,6 +400,7 @@ class Conductor:
                     "stealth": self.ctx.stealth.summary(),
                     "chain_audit": self.chain.audit() if self.chain else {},
                     "metrics": self.metrics.snapshot(),
+                    "orchestration": self.orchestration.snapshot(),
                 })
         except Exception:  # noqa: BLE001 - hesabat yaradılmasa da pipeline bitməlidir
             print("[!] Hesabat yaradıla bilmədi:")

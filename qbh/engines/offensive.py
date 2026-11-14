@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import shutil
 
-from .. import db
+from .. import db, urlintel
 from ..results import EngineResult
 from ..scope import ScopeError
 
@@ -31,6 +31,8 @@ class OffensiveEngine:
         self.ctx = ctx
         self.cfg = ctx.cfg
         self.guardian = ctx.guardian
+        #: Son `candidate_urls` planı (uyğunluq qərarları, metrikalar üçün).
+        self.last_plan = None
 
     @property
     def scan_id(self) -> int:
@@ -42,8 +44,16 @@ class OffensiveEngine:
 
     # ------------------------------------------------------------ targets
     def candidate_urls(self, *, only_params: bool = False,
-                       limit: int | None = None) -> list:
-        """Cari skanın kandidat URL-ləri (yalnız scope-daxili hostlardan)."""
+                       limit: int | None = None,
+                       engine: str | None = None) -> list:
+        """Cari skanın kandidat URL-ləri (yalnız scope-daxili hostlardan).
+
+        `engine` verildikdə URL Intelligence uyğunluq süzgəci tətbiq olunur:
+        uyğun olmayan statik resurslar ATILIR (səbəblə qeyd olunur), naməlum
+        endpoint-lər isə `deferred` kimi saxlanılır. Sətirlər həmişə
+        prioritet sırasına salınır (ən mənalı endpoint əvvəl).
+        """
+        max_n = int(limit or self.max_targets)
         q = ("SELECT u.id, u.url, u.host_id, h.subdomain FROM urls u "
              "JOIN hosts h ON h.id=u.host_id "
              "WHERE h.scan_id=? AND u.is_js=0 "
@@ -52,9 +62,19 @@ class OffensiveEngine:
         if only_params:
             q += " AND u.url LIKE '%?%=%'"
         q += " LIMIT ?"
-        rows = db.get_db().execute(
-            q, (self.scan_id, limit or self.max_targets)).fetchall()
-        return rows
+        fetch_n = urlintel.fetch_limit(max_n, self.max_targets,
+                                       filtering=bool(engine))
+        rows = db.get_db().execute(q, (self.scan_id, fetch_n)).fetchall()
+        if not rows:
+            return []
+        intel = urlintel.get_url_intelligence(self.ctx)
+        selected, plan = intel.plan_rows(rows, engine=engine, limit=max_n)
+        self.last_plan = plan
+        if engine and self.ctx.orchestration is not None:
+            self.ctx.orchestration.record_engine(
+                engine, input_urls=plan.raw, eligible_urls=plan.eligible,
+                skipped_urls=plan.excluded, deferred_urls=plan.deferred)
+        return selected
 
     # ------------------------------------------------------------ gating
     async def gate(self, url: str, res: EngineResult, *,

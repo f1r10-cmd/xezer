@@ -26,13 +26,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import db
+from . import db, urlintel
+from .adaptive import (STRENGTH_STRONG, STRENGTH_WEAK, Signal)
 from .engines.api_fuzz import APIFuzzEngine
 from .engines.bypass import BypassEngine
 from .engines.confirm import ConfirmEngine
 from .engines.param_enum import ParamEnumEngine
 from .engines.secret_replay import SecretReplayEngine
 from .results import EngineResult
+from .tasks import STATE_COMPLETED, task_identity
 
 #: Trigger → avtomatik davam hərəkətləri.
 TRIGGERS: dict[str, list[str]] = {
@@ -73,6 +75,18 @@ ACTION_EXEC = {
     "ssti_probe": "delegated", "ssrf_probe": "delegated",
     "jwt_probe": "delegated", "source_harvest": "delegated",
     "library_cve_check": "delegated",
+}
+
+#: Faza 5 (§9): siqnal → sübut gücü. Zəif siqnallar yalnız təsdiq
+#: (confirm-only) işini planlaşdırır; güclü siqnallar hədəfli izləməyə icazə verir.
+SIGNAL_STRENGTH = {
+    "sqli_signal": STRENGTH_WEAK,
+    "xss_signal": STRENGTH_WEAK,
+    "ssti_signal": STRENGTH_WEAK,
+    "ssrf_signal": STRENGTH_WEAK,
+    "jwt": STRENGTH_STRONG,
+    "git_exposed": STRENGTH_STRONG,
+    "vuln_js_lib": STRENGTH_STRONG,
 }
 
 #: Fingerprint/səhifə mətnində template engine işarələri → SSTI.
@@ -144,6 +158,15 @@ class ChainPipeline:
         self.delegated: list[str] = []
         self.skipped: list[str] = []
         self._tasks = 0
+        # Faza 3/5 (§7,§9): hadisə + tapşırıq idempotentliyi və adaptiv nəzarət.
+        # `ctx` bunları vermirsə (köhnə testlər) zəncir ƏVVƏLKİ kimi işləyir.
+        self.event_ledger = getattr(ctx, "event_ledger", None)
+        self.task_ledger = getattr(ctx, "task_ledger", None)
+        self.adaptive = getattr(ctx, "adaptive", None)
+        self.metrics = getattr(ctx, "orchestration", None)
+        self.duplicates = 0            # təkrarlanan hadisə (hadisə səviyyəsi)
+        self.suppressed = 0            # təkrar/dövri tetikleme və ya dublikat tapşırıq
+        self._noted: set[str] = set()
 
     @property
     def enabled(self) -> bool:
@@ -151,10 +174,33 @@ class ChainPipeline:
 
     # ------------------------------------------------------------------ emit
     def emit(self, kind: str, detail: str = "") -> list[str]:
-        """Trigger-i qeyd edir və icazəli davam hərəkətlərini qaytarır."""
+        """Trigger-i qeyd edir və icazəli davam hərəkətlərini qaytarır.
+
+        Faza 3 (§7.4) nizamı: (1) hadisə səviyyəsində deduplikasiya,
+        (2) dövr/təkrar-tetikleme nəzarəti, (3) RoE qapısı. Beləliklə eyni
+        trigger-in min dəfə emissiyası eyni davam işini TƏKRAR planlaşdırmır.
+        """
+        event_id = ""
+        if self.event_ledger is not None:
+            decision = self.event_ledger.accept(kind, detail)
+            if not decision.accept:
+                self.duplicates += 1
+                self._sync_chain_metrics()
+                return []
+            event_id = decision.identity
         planned = list(TRIGGERS.get(kind, []))
         allowed: list[str] = []
         for action in planned:
+            if self.event_ledger is not None:
+                g = self.event_ledger.guard(source=kind, destination=action,
+                                            identity=event_id)
+                if not g.accept:
+                    self.suppressed += 1
+                    key = f"{kind}:{action}"
+                    if key not in self._noted:      # audit üçün yalnız BİR dəfə
+                        self._noted.add(key)
+                        self.skipped.append(f"{key} ({g.reason})")
+                    continue
             gate = self._gate(action)
             if gate is None:
                 allowed.append(action)
@@ -164,6 +210,8 @@ class ChainPipeline:
         self.events.append(ev)
         if allowed:
             print(f"   [⛓] zəncir: {kind} → {', '.join(allowed)}")
+        self._evaluate_signal(kind, detail, allowed)
+        self._sync_chain_metrics()
         return allowed
 
     def _gate(self, action: str) -> str | None:
@@ -184,6 +232,52 @@ class ChainPipeline:
 
     def _budget_ok(self) -> bool:
         return self._tasks < self.cfg_chain.max_tasks
+
+    # ------------------------------------------------- idempotentlik / siqnal
+    def _begin(self, test_type: str, engine: str, endpoint: str = "") -> str | None:
+        """Lokal zəncir addımı üçün idempotentlik qərarı.
+
+        Qaytarır: kimlik sətri (icra et) və ya `None` (artıq edilib → atla).
+        `task_ledger` yoxdursa `""` qaytarır — yəni qapı YOXDUR (köhnə davranış).
+        """
+        if self.task_ledger is None:
+            return ""
+        identity = task_identity(self.store.scan_id, engine,
+                                 endpoint or test_type, test_type=test_type)
+        decision = self.task_ledger.consider(
+            identity, engine=engine, endpoint=endpoint or test_type,
+            test_type=test_type)
+        if not decision.create:
+            self.suppressed += 1
+            self._sync_chain_metrics()
+            return None
+        return identity
+
+    def _done(self, identity: str) -> None:
+        if identity and self.task_ledger is not None:
+            self.task_ledger.mark(identity, STATE_COMPLETED)
+
+    def _evaluate_signal(self, kind: str, detail: str,
+                         allowed: list[str]) -> None:
+        """Siqnalı adaptiv nəzarətçiyə ötürür (davam testi qərarı QEYD olunur)."""
+        strength = SIGNAL_STRENGTH.get(kind)
+        if strength is None or self.adaptive is None:
+            return
+        try:
+            endpoint = urlintel.endpoint_identity(detail) or detail
+        except Exception:  # noqa: BLE001 - normalizasiya uğursuz olsa da davam et
+            endpoint = detail
+        identity = task_identity(self.store.scan_id, "chain", endpoint,
+                                 test_type=kind)
+        self.adaptive.evaluate(
+            Signal(kind=kind, strength=strength, detail=detail),
+            identity=identity, actions=tuple(allowed))
+
+    def _sync_chain_metrics(self) -> None:
+        if self.metrics is None:
+            return
+        if self.event_ledger is not None:
+            self.metrics.record_chain_stats(self.event_ledger.snapshot())
 
     # ------------------------------------------------------------- discovery
     def _discover_triggers(self) -> None:
@@ -310,6 +404,9 @@ class ChainPipeline:
             return
         if not self._budget_ok():
             return
+        ident = self._begin("hidden_param_detect", "param")
+        if ident is None:
+            return
         self._tasks += 1
         sub = await ParamEnumEngine(self.ctx).run()
         res.findings += sub.findings
@@ -317,6 +414,7 @@ class ChainPipeline:
         for action in ("hidden_param_detect", "param_fuzz"):
             if action in allowed:
                 self.executed.append(action)
+        self._done(ident)
 
     async def _run_openapi_steps(self, res: EngineResult) -> None:
         """Faza 3.4: OpenAPI sxemi üzərində Schemathesis (GET-only) icrası."""
@@ -326,11 +424,15 @@ class ChainPipeline:
             return
         if not self._budget_ok():
             return
+        ident = self._begin("schemathesis_fuzz", "api")
+        if ident is None:
+            return
         self._tasks += 1
         sub = await APIFuzzEngine(self.ctx).run()
         res.findings += sub.findings
         res.warnings += sub.warnings
         self.executed.append("schemathesis_fuzz")
+        self._done(ident)
 
     async def run(self) -> EngineResult:
         res = EngineResult(stage="chain")
@@ -346,27 +448,36 @@ class ChainPipeline:
 
         # --- local hərəkətlər (birbaşa icra) ---
         if self._budget_ok() and self.auth.allows("bypass"):
-            interesting_urls = [e.detail for e in self.events
-                                if e.kind == "interesting_endpoint"][:25]
-            self._tasks += 1
-            sub = await BypassEngine(self.ctx).run(interesting_urls or None)
-            res.findings += sub.findings
-            res.warnings += sub.warnings
-            self.executed.append("bypass_matrix")
+            ident = self._begin("bypass_matrix", "bypass")
+            if ident is not None:
+                interesting_urls = [e.detail for e in self.events
+                                    if e.kind == "interesting_endpoint"][:25]
+                self._tasks += 1
+                sub = await BypassEngine(self.ctx).run(interesting_urls or None)
+                res.findings += sub.findings
+                res.warnings += sub.warnings
+                self.executed.append("bypass_matrix")
+                self._done(ident)
 
         if self._budget_ok() and self.auth.allows("cve_poc"):
-            self._tasks += 1
-            conf = await ConfirmEngine(self.ctx).run()
-            res.findings += conf.findings
-            self.executed.append("confirm_template")
+            ident = self._begin("confirm_template", "confirm")
+            if ident is not None:
+                self._tasks += 1
+                conf = await ConfirmEngine(self.ctx).run()
+                res.findings += conf.findings
+                self.executed.append("confirm_template")
+                self._done(ident)
 
         # Faza 3.2: şifrəli secret replay (RoE + vault qapısı ilə).
         if self._budget_ok() and self.auth.allows("secret_replay"):
-            self._tasks += 1
-            rep = await SecretReplayEngine(self.ctx).run()
-            res.findings += rep.findings
-            res.warnings += rep.warnings
-            self.executed.append("secret_replay")
+            ident = self._begin("secret_replay", "secret_replay")
+            if ident is not None:
+                self._tasks += 1
+                rep = await SecretReplayEngine(self.ctx).run()
+                res.findings += rep.findings
+                res.warnings += rep.warnings
+                self.executed.append("secret_replay")
+                self._done(ident)
 
         if self._budget_ok():
             boosted = self._boost_nuclei_confidence()
@@ -384,16 +495,20 @@ class ChainPipeline:
                 if ACTION_EXEC.get(action) == "delegated":
                     self.delegated.append(action)
 
+        self._sync_chain_metrics()
         res.data = {
             "events": len(self.events),
             "executed": sorted(set(self.executed)),
             "delegated": sorted(set(self.delegated)),
             "skipped": self.skipped,
+            "duplicates": self.duplicates,
+            "suppressed": self.suppressed,
         }
         print(f"   [⛓] zəncir: {len(self.events)} trigger · "
               f"icra: {len(set(self.executed))} · "
               f"delegasiya: {len(set(self.delegated))} · "
-              f"atlanan: {len(self.skipped)}")
+              f"atlanan: {len(self.skipped)} · "
+              f"dublikat: {self.duplicates}")
         return res
 
     def audit(self) -> dict:
@@ -403,4 +518,6 @@ class ChainPipeline:
             "executed": sorted(set(self.executed)),
             "delegated": sorted(set(self.delegated)),
             "skipped": self.skipped,
+            "duplicates": self.duplicates,
+            "suppressed": self.suppressed,
         }

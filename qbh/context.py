@@ -24,6 +24,18 @@ class Context:
     waf_name: str = ""
     #: Faza 0 (§3): skan-scoped HTTP metrikaları (HttpPolicy ilə paylaşılır).
     metrics: Any = None
+    #: Faza 6 (§10): orkestrasiya metrikaları (URL/görev/zəncir/mühərrik).
+    orchestration: Any = None
+    #: Faza 3 (§7): görev identikliyi/idempotentlik reyestri.
+    task_ledger: Any = None
+    #: Faza 3 (§7.4): zəncir hadisə reyestri (dedup + dərinlik/dövr qoruyucusu).
+    event_ledger: Any = None
+    #: Faza 4 (§8): mərkəzləşdirilmiş məhdud görev planlayıcısı.
+    scheduler: Any = None
+    #: Faza 5 (§9): sübut-əsaslı adaptiv izləmə nəzarətçisi.
+    adaptive: Any = None
+    #: Faza 1 (§5): URL Intelligence (lazy tək nüsxə).
+    _urlintel: Any = None
     _egress: Any = None
     _oob: Any = None
     _stealth: Any = None

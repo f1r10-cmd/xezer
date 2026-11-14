@@ -37,7 +37,8 @@ class XSSEngine(OffensiveEngine):
         res = EngineResult(stage=self.name)
         if not self.ctx.allows("active_fuzz"):
             return res.skip("aktiv fuzz qadağandır — XSS atlandı")
-        rows = self.candidate_urls(only_params=True, limit=self.max_targets)
+        rows = self.candidate_urls(only_params=True, limit=self.max_targets,
+                                   engine=self.name)
         if not rows:
             return res.skip("parametrli URL yoxdur — XSS atlandı")
         if not self.guardian:

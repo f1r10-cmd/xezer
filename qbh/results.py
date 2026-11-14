@@ -22,6 +22,7 @@ class EngineResult:
     stage: str
     ok: bool = True
     skipped: bool = False
+    partial: bool = False
     findings: int = 0
     hosts: int = 0
     urls: int = 0
@@ -36,6 +37,15 @@ class EngineResult:
         self.errors.append(str(msg))
         self.ok = False
 
+    def mark_partial(self, msg: str) -> None:
+        """Mərhələ TAM uğurlu DEYİL — natamam nəticə (məs. timeout) alındı.
+
+        `ok` True qalır (uydurma uğursuzluq yoxdur), lakin mərhələ artıq
+        "tam uğurlu" kimi raportlanmır (`StageResult.status == "partial"`).
+        """
+        self.partial = True
+        self.warn(msg)
+
     def skip(self, reason: str) -> "EngineResult":
         self.skipped = True
         self.warn(reason)
@@ -47,7 +57,7 @@ class StageResult:
     """Conductor-un hər mərhələ üçün strukturlaşdırılmış xülasəsi."""
 
     stage: str
-    status: str                  # ok | failed | skipped | cancelled
+    status: str                  # ok | partial | failed | skipped | cancelled
     started_at: str
     completed_at: str = ""
     duration: float = 0.0

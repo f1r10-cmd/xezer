@@ -351,6 +351,10 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
                      f"{_esc(notes, 300) or '—'} |")
         skipped = [s for s in stages if getattr(s, "status", "") == "skipped"]
         failed = [s for s in stages if getattr(s, "status", "") == "failed"]
+        partial = [s for s in stages if getattr(s, "status", "") == "partial"]
+        if partial:
+            L += ["", "**Natamam mərhələlər (qismən nəticə):** " +
+                  ", ".join(_esc(getattr(s, "stage", "?")) for s in partial)]
         if skipped:
             L += ["", "**Atlanan mərhələlər:** " +
                   ", ".join(_esc(getattr(s, "stage", "?")) for s in skipped)]

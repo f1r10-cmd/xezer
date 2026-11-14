@@ -20,7 +20,7 @@ from .scope import ScopeEnforcer, ScopeError, normalize_host
 KNOWN_TOP_KEYS = {
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
-    "oob", "stealth", "vault", "vuln",
+    "oob", "stealth", "vault", "vuln", "content", "api_enum",
 }
 
 #: Faza 2 — stealth qatının strateji variantları.
@@ -168,6 +168,35 @@ class VulnConfig:
 
 
 @dataclass
+class ContentConfig:
+    """M5 — ffuf content discovery limitləri (hamısı əvvəlki davranışı qoruyur).
+
+    `timeout_seconds` əvvəlki sabit `TIMEOUT=600`-ü, `max_words` 20 000 söz
+    limitini, `max_hosts`/`max_results` isə müvafiq sabitləri əvəz edir.
+    Timeout halında ffuf-un JSON çıxışı hələ də oxunur və qismən nəticələr
+    saxlanılır (mərhələ `partial` kimi raportlanır).
+    """
+
+    timeout_seconds: float = 600.0
+    max_words: int = 20_000
+    max_hosts: int = 10
+    max_results: int = 30
+
+
+@dataclass
+class APIEnumConfig:
+    """API Enum — Kiterunner route faylı yolları (fallback sabitlər qorunur).
+
+    `route_paths` ya `.kite` faylı, ya da `.kite` faylları olan kataloq ola
+    bilər. Fayl/kataloq mövcud və oxunaqlı olmalıdır; rekursiv filesystem
+    axtarışı APARILMIR. Siyahı boşdursa yalnız daxili fallback yolları
+    (`KR_FILES`) yoxlanılır.
+    """
+
+    route_paths: list = field(default_factory=list)
+
+
+@dataclass
 class ProgramRules:
     """Rules of Engagement — proqramın qadağaları."""
     forbidden: set[str] = field(default_factory=set)
@@ -195,6 +224,8 @@ class Config:
     stealth: StealthConfig = field(default_factory=StealthConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
     vuln: VulnConfig = field(default_factory=VulnConfig)
+    content: ContentConfig = field(default_factory=ContentConfig)
+    api_enum: APIEnumConfig = field(default_factory=APIEnumConfig)
     program_rules: ProgramRules = field(default_factory=ProgramRules)
     warnings: list[str] = field(default_factory=list)
     _raw: dict = field(default_factory=dict)
@@ -264,13 +295,16 @@ class Config:
         stealth = cls._validate_stealth(raw.get("stealth"), aggressiveness)
         vault = cls._validate_vault(raw.get("vault"), warnings)
         vuln = cls._validate_vuln(raw.get("vuln"), warnings)
+        content = cls._validate_content(raw.get("content"), warnings)
+        api_enum = cls._validate_api_enum(raw.get("api_enum"), warnings)
 
         return cls(
             path=path, program=program, nvd_api_key=nvd_key, scope=scope,
             limits=limits, proxy_file=proxy_file, interface=interface,
             aggressiveness=aggressiveness, rotation=rotation,
             block_strategy=block_strategy, chain=chain, oob=oob,
-            stealth=stealth, vault=vault, vuln=vuln,
+            stealth=stealth, vault=vault, vuln=vuln, content=content,
+            api_enum=api_enum,
             program_rules=program_rules, warnings=warnings, _raw=raw,
         )
 
@@ -560,6 +594,61 @@ class Config:
                 if not isinstance(vuln[key], bool):
                     raise ConfigError(f"vuln.{key} boolean olmalıdır")
                 setattr(cfg, key, vuln[key])
+        return cfg
+
+    @staticmethod
+    def _validate_content(content, warnings: list[str]) -> ContentConfig:
+        """`content` bölməsini validasiya edir (default: əvvəlki sabitlər).
+
+        Rəqəmsal limitlər CİDDİ şəkildə yoxlanılır — `True`/`"600"` qəbul
+        EDİLMİR. Açarlar verilməzsə köhnə davranış dəyişmir.
+        """
+        cfg = ContentConfig()
+        if content is None:
+            return cfg
+        if not isinstance(content, dict):
+            raise ConfigError("content mapping olmalıdır")
+        int_keys = ("max_words", "max_hosts", "max_results")
+        keys = ("timeout_seconds", *int_keys)
+        for key in content:
+            if key not in keys:
+                warnings.append(f"naməlum content açarı: {key!r}")
+        if content.get("timeout_seconds") is not None:
+            val = content["timeout_seconds"]
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise ConfigError("content.timeout_seconds rəqəm olmalıdır")
+            if val < 1:
+                raise ConfigError("content.timeout_seconds ən azı 1 olmalıdır")
+            cfg.timeout_seconds = float(val)
+        for key in int_keys:
+            if content.get(key) is None:
+                continue
+            val = content[key]
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ConfigError(f"content.{key} tam ədəd olmalıdır")
+            if val < 1:
+                raise ConfigError(f"content.{key} ən azı 1 olmalıdır")
+            setattr(cfg, key, val)
+        return cfg
+
+    @staticmethod
+    def _validate_api_enum(api_enum, warnings: list[str]) -> APIEnumConfig:
+        """`api_enum` bölməsini validasiya edir (route faylı yolları)."""
+        cfg = APIEnumConfig()
+        if api_enum is None:
+            return cfg
+        if not isinstance(api_enum, dict):
+            raise ConfigError("api_enum mapping olmalıdır")
+        for key in api_enum:
+            if key != "route_paths":
+                warnings.append(f"naməlum api_enum açarı: {key!r}")
+        paths = api_enum.get("route_paths")
+        if paths is None:
+            return cfg
+        if not isinstance(paths, list) or not all(
+                isinstance(p, str) for p in paths):
+            raise ConfigError("api_enum.route_paths mətn siyahısı olmalıdır")
+        cfg.route_paths = [p.strip() for p in paths if p.strip()]
         return cfg
 
     # ---------------- köməkçilər ----------------

@@ -544,6 +544,27 @@ def alive_hosts(scan_id=None, include_halted: bool = False):
     return get_db().execute(sql, params).fetchall()
 
 
+def scheme_hint(host_id: int, scan_id=None) -> str | None:
+    """Host üçün saxlanmış recon URL-lərindən protokol ipucu ("http"/"https").
+
+    Recon mərhələsində (katana/gau) tapılan URL-lər tam sxemlə saxlanılır.
+    Fingerprint/WAF bu ipucudan istifadə edərək hostu yenidən zondlamadan
+    düzgün protokolu seçir. Etibarlı məlumat yoxdursa `None` qaytarılır
+    (mühərrik məhdud HTTP/HTTPS yoxlaması aparacaq).
+    """
+    sid = effective_scan_id(scan_id)
+    rows = get_db().execute(
+        "SELECT url FROM urls WHERE host_id=? AND scan_id=? LIMIT 20",
+        (host_id, sid)).fetchall()
+    for r in rows:
+        u = (r["url"] or "").strip().lower()
+        if u.startswith("https://"):
+            return "https"
+        if u.startswith("http://"):
+            return "http"
+    return None
+
+
 def all_hosts(scan_id=None):
     """Conkret skanın bütün hostları (default: legacy qrupu)."""
     sid = effective_scan_id(scan_id)

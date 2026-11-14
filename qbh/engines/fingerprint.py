@@ -5,6 +5,10 @@ Prinsiplər:
   * Versiya yalnız MÜTLƏQ dəstəklənən mənbədən çıxarılır (Server başlığı,
     meta generator, readme) — uydurma versiya iddiası yoxdur.
   * Hər versiya üçün `confidence` saxlanılır.
+  * Protokol (HTTP/HTTPS) host başına TƏHLÜKƏSİZ şəkildə seçilir
+    (`ServiceResolver`) — yalnız HTTP-də xidmət göstərən host da düzgün
+    skan olunur. Əvvəlcə saxlanmış recon URL ipucu, yoxdursa məhdud sayda
+    HTTP/HTTPS yoxlaması aparılır.
   * Bütün sorğular Guardian/HttpPolicy-dən keçir (scope + rate + cooldown).
 """
 from __future__ import annotations
@@ -18,6 +22,7 @@ from .. import db
 from ..http_policy import TargetBlocked
 from ..results import EngineResult
 from ..scope import ScopeError
+from ..service_url import ServiceResolver, failure_label
 
 STRATEGY_DIR = "config/strategies"
 
@@ -51,39 +56,45 @@ class FingerprintEngine:
             return res.skip("yaşayan host yoxdur — fingerprint atlandı")
         print(f"[═══ M2 FINGERPRINT ═══] {len(hosts)} host")
 
+        resolver = ServiceResolver(self.guardian)
         for row in hosts:
             host = row["subdomain"]
             if self.guardian and self.guardian.halted(host):
                 res.warn(f"{host} cooldown altındadır — atlandı")
                 continue
             try:
-                await self._fingerprint(host, row, res)
+                await self._fingerprint(row, res, resolver)
             except TargetBlocked as exc:
                 res.warn(str(exc))
             except ScopeError as exc:
                 res.warn(f"{host}: {exc}")
         return res
 
-    async def _fingerprint(self, host: str, row, res: EngineResult) -> None:
+    async def _fingerprint(self, row, res: EngineResult,
+                           resolver: ServiceResolver) -> None:
         import aiohttp
+        host = row["subdomain"]
         async with aiohttp.ClientSession() as session:
-            status, headers, body = await self._fetch(
-                session, f"https://{host}/")
-            if status is None:
-                res.warn(f"{host}: cavab alınmadı")
+            hint = db.scheme_hint(row["id"], self.ctx.scan_id)
+            ep = await resolver.resolve(session, host, hint=hint)
+            if not ep.ok:
+                res.warn(f"{host}: heç bir protokol əlçatan deyil "
+                         f"({failure_label(ep.kind)})")
                 return
 
+            # Seçilmiş protokolun İLK cavabı təkrar istifadə olunur.
+            headers, body = ep.headers, ep.body
             techs = self._detect(host, headers, body)
             strategy = techs[0][1] if techs else "generic"
             if strategy == "generic":
                 code, _, _ = await self._fetch(
-                    session, f"https://{host}/wp-login.php")
+                    session, ep.url("/wp-login.php"))
                 if code == 200:
                     strategy = "wordpress"
                     techs.append(("wordpress", "wordpress", 0.5))
 
             product, version, conf = await self._version(
-                session, host, strategy, headers, body)
+                session, ep, strategy, headers, body)
             tech_raw = self._tech_raw(row["tech_raw"], techs, product, version)
             db.upsert_host(host, self.ctx.scan_id, strategy=strategy,
                            tech_raw=tech_raw[:500])
@@ -92,7 +103,7 @@ class FingerprintEngine:
                     "host": host, "product": product, "version": version,
                     "confidence": conf})
 
-            await self._strategy_checks(session, row, host, strategy, res)
+            await self._strategy_checks(session, ep, row, host, strategy, res)
 
     # ---------------- HTTP ----------------
     async def _fetch(self, session, url: str):
@@ -137,7 +148,7 @@ class FingerprintEngine:
             base = f"{base}|{product}:{version}"
         return base.strip("|,")
 
-    async def _version(self, session, host: str, strategy: str, headers, body):
+    async def _version(self, session, ep, strategy: str, headers, body):
         """(product, version, confidence) — yalnız MÜTLƏQ mənbədən."""
         server = headers.get("Server", "") or headers.get("server", "")
         m = re.match(r"(nginx|Apache|gunicorn|Microsoft-IIS)/([0-9][0-9.]*)",
@@ -146,7 +157,7 @@ class FingerprintEngine:
             return m.group(1).lower(), m.group(2), _VERSION_CONF["header"]
 
         if strategy == "wordpress":
-            code, _, rd = await self._fetch(session, f"https://{host}/readme.html")
+            code, _, rd = await self._fetch(session, ep.url("/readme.html"))
             if code == 200:
                 mm = re.search(r"[Vv]ersion\s+([0-9]+\.[0-9.]+)", rd)
                 if mm:
@@ -162,7 +173,7 @@ class FingerprintEngine:
         return None, None, 0.0
 
     # ---------------- strategiya yoxlamaları ----------------
-    async def _strategy_checks(self, session, row, host, strategy, res) -> None:
+    async def _strategy_checks(self, session, ep, row, host, strategy, res) -> None:
         path = os.path.join(STRATEGY_DIR, f"{strategy}.yaml")
         try:
             with open(path, "r", encoding="utf-8") as fh:
@@ -176,8 +187,7 @@ class FingerprintEngine:
             cpath = check.get("path")
             if not cpath or not str(cpath).startswith("/"):
                 continue
-            code, _, body = await self._fetch(
-                session, f"https://{host}{cpath}")
+            code, _, body = await self._fetch(session, ep.url(cpath))
             if not code:
                 continue
             expected = [str(s) for s in check.get("expect_status", [200])]

@@ -6,6 +6,15 @@ Təhlükəsizlik prinsipləri:
   * Rate limit hörmətlə qarşılanır; cooldown-dakı hədəf atlanır.
   * Tapılan URL-lər scope yoxlamasından keçir.
   * Subprocess shell-siz; timeout/cancel zamanı öldürülür.
+
+Etibarlılıq:
+  * Limitlər (`content.timeout_seconds`, `content.max_words`,
+    `content.max_hosts`, `content.max_results`) konfiqurasiya ilə idarə olunur;
+    default-lar əvvəlki sabitlərlə eynidir.
+  * ffuf timeout və ya sıfırdan fərqli çıxış kodu ilə bitsə də, yazılmış JSON
+    çıxışı OXUNUR. Etibarlı qismən nəticələr saxlanılır; zədələnmiş fayl
+    yalnız xəbərdarlıqla bildirilir və HEÇ VAXT tapıntı yaradılmır.
+  * Timeout olunan mərhələ `partial` kimi raportlanır — "tam uğurlu" DEYİL.
 """
 from __future__ import annotations
 
@@ -20,10 +29,6 @@ from ..scope import ScopeError
 
 WORDLIST = "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
 
-MAX_HOSTS = 10
-MAX_WORDS = 20_000
-MAX_RESULTS = 30
-TIMEOUT = 600
 MATCH_CODES = "200,204,301,302,307,401,403"
 INTERESTING_STATUS = (200, 401, 403)
 
@@ -39,10 +44,11 @@ class ContentEngine:
 
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
+        conf = self.cfg.content
         if not os.path.exists(WORDLIST):
             return res.skip(f"wordlist yoxdur: {WORDLIST} (apt install seclists)")
 
-        hosts = db.alive_hosts(self.ctx.scan_id)[:MAX_HOSTS]
+        hosts = db.alive_hosts(self.ctx.scan_id)[:conf.max_hosts]
         if not hosts:
             return res.skip("yaşayan host yoxdur — content discovery atlandı")
         print(f"[═══ M5 CONTENT (ffuf) ═══] {len(hosts)} host")
@@ -62,15 +68,16 @@ class ContentEngine:
 
     async def _ffuf(self, host_row, res: EngineResult) -> None:
         host = host_row["subdomain"]
+        conf = self.cfg.content
         # Faza 0.2: alt-proses hədəfi scope yoxlaması + DNS pinning-dən keçir.
         tset = await self.ctx.egress.authorize_process_targets(
             [f"https://{host}"])
         if host not in set(tset.hostnames):
             res.warn(f"egress: {host} scope xaricindədir — ffuf atlandı")
             return
-        wordlist, tmp_words = limited_wordlist(WORDLIST, MAX_WORDS)
+        wordlist, tmp_words = limited_wordlist(WORDLIST, conf.max_words)
         if tmp_words:
-            res.warn(f"{host}: wordlist {MAX_WORDS} sətrə məhdudlaşdırıldı")
+            res.warn(f"{host}: wordlist {conf.max_words} sətrə məhdudlaşdırıldı")
         fd, out_file = tempfile.mkstemp(prefix="qbh_ffuf_", suffix=".json")
         os.close(fd)
         # Faza 3.6: WAF-a görə rate/concurrency + insan-təqlidi başlıqlar.
@@ -88,13 +95,31 @@ class ContentEngine:
                 "-of", "json", "-o", out_file,
                 "-mc", MATCH_CODES,
             ]
-            proc = await run_process(args, timeout=TIMEOUT)
+            proc = await run_process(args, timeout=conf.timeout_seconds)
             if proc.missing:
                 res.warn("ffuf tapılmadı — atlandı")
                 return
+            incomplete = False
             if proc.timed_out:
-                res.warn(f"ffuf {host}: timeout ({TIMEOUT}s)")
-            self._parse(host_row, out_file, res)
+                incomplete = True
+                res.warn(f"ffuf {host}: timeout ({conf.timeout_seconds}s) — "
+                         "qismən nəticələr yoxlanılır")
+            elif proc.returncode != 0:
+                incomplete = True
+                res.warn(f"ffuf {host}: çıxış kodu {proc.returncode} — "
+                         "qismən nəticələr yoxlanılır")
+            parsed, found = self._parse(host_row, out_file, res)
+            if incomplete:
+                if parsed:
+                    res.mark_partial(
+                        f"ffuf {host}: natamam nəticə ({found} nəticə) — "
+                        "mərhələ tam uğurlu sayılmır")
+                else:
+                    res.mark_partial(
+                        f"ffuf {host}: natamam/etibarsız çıxış — "
+                        "mərhələ tam uğurlu sayılmır")
+            elif not parsed:
+                res.warn(f"ffuf {host}: JSON nəticəsi oxuna bilmədi")
         finally:
             for path in (out_file, tmp_words):
                 if path:
@@ -103,20 +128,32 @@ class ContentEngine:
                     except OSError:
                         pass
 
-    def _parse(self, host_row, out_file: str, res: EngineResult) -> None:
+    def _parse(self, host_row, out_file: str, res: EngineResult) -> tuple[bool, int]:
+        """ffuf JSON çıxışını oxuyur. `(uyğun_oxundu, qeyd_olunan_nəticə)`.
+
+        Zədələnmiş/natamam fayl halında `(False, 0)` qaytarır və xəbərdarlıq
+        verir — HEÇ VAXT yarımçıq datadan tapıntı yaradılmır.
+        """
         host = host_row["subdomain"]
         try:
             with open(out_file, "r", encoding="utf-8", errors="ignore") as fh:
                 data = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            return
+        except (OSError, json.JSONDecodeError) as exc:
+            res.warn(f"ffuf {host}: JSON çıxışı oxuna bilmədi "
+                     f"({type(exc).__name__}) — natamam/zədələnmiş nəticə "
+                     "nəzərə alınmır")
+            return False, 0
+        if not isinstance(data, dict):
+            res.warn(f"ffuf {host}: JSON çıxışı gözlənilən formatda deyil")
+            return False, 0
 
         interesting = [
-            r for r in data.get("results", [])
-            if r.get("status") in INTERESTING_STATUS
+            r for r in data.get("results", []) or []
+            if isinstance(r, dict)
+            and r.get("status") in INTERESTING_STATUS
             and (r.get("length") or 0) > 100]
         shown = 0
-        for r in interesting[:MAX_RESULTS]:
+        for r in interesting[:self.cfg.content.max_results]:
             url = r.get("url")
             if not url:
                 continue
@@ -136,3 +173,4 @@ class ContentEngine:
                 res.findings += 1
         if shown:
             print(f"[+] ffuf {host}: {shown} nəticə")
+        return True, shown

@@ -192,6 +192,8 @@ class Conductor:
                 sr.data = result.data
                 if result.skipped:
                     sr.status = "skipped"
+                elif result.partial:
+                    sr.status = "partial"
                 elif result.ok:
                     sr.status = "ok"
                 else:
@@ -201,7 +203,8 @@ class Conductor:
         sr.completed_at = now_iso()
         sr.duration = round(time.monotonic() - t0, 3)
         self._record(sr)
-        marker = {"ok": "✓", "skipped": "·", "failed": "✗"}.get(sr.status, "?")
+        marker = {"ok": "✓", "partial": "~", "skipped": "·",
+                  "failed": "✗"}.get(sr.status, "?")
         print(f"   [{marker}] {label} — {sr.duration:.2f}s, "
               f"{sr.findings_count} tapıntı")
         return sr
@@ -350,6 +353,11 @@ class Conductor:
     def failed_stages(self) -> list[StageResult]:
         return [s for s in self.stages if s.status == "failed"]
 
+    @property
+    def partial_stages(self) -> list[StageResult]:
+        """Natamam (timeout/qismən nəticə) tamamlanmış mərhələlər."""
+        return [s for s in self.stages if s.status == "partial"]
+
     def print_summary(self) -> None:
         print("\n=== İCRA XÜLASƏSİ ===")
         if not self.stages:
@@ -397,9 +405,14 @@ class Conductor:
             raise
         finally:
             await self.ctx.oob.stop()
-            if status != "cancelled" and self.failed_stages:
-                status = "partial" if len(self.failed_stages) < len(self.stages) \
-                    else "failed"
+            if status != "cancelled":
+                if self.failed_stages:
+                    status = "partial" if len(self.failed_stages) < len(self.stages) \
+                        else "failed"
+                elif self.partial_stages:
+                    # Bütün mərhələlər "ok" olsa da bəziləri NATAMAMDIR —
+                    # skanı tam uğurlu kimi təqdim etmək olmaz.
+                    status = "partial"
             self.generate_report()
             db.finish_scan(self.scan_id, status)
             self.print_summary()

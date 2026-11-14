@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -36,9 +37,13 @@ from .scope import ScopeEnforcer, ScopeError, extract_host
 class TargetBlocked(RuntimeError):
     """Hədəf blok/cooldown altındadır — sorğu göndərilmir."""
 
-    def __init__(self, *args, suggest_bypass: bool = False):
+    def __init__(self, *args, suggest_bypass: bool = False, block_events=None):
         super().__init__(*args)
         self.suggest_bypass = suggest_bypass
+        #: Faza 1 (§6.3): MƏHZ bu sorğu zamanı yaranan blok hadisələri.
+        #: Guardian bunları paylaşılan `policy.block_events` dilimindən DEYİL,
+        #: buradan oxuyur → konkurentlikdə host/req atribusiyası dəqiqdir.
+        self.block_events = list(block_events or [])
 
 
 def parse_retry_after(value) -> float:
@@ -111,11 +116,24 @@ class HttpPolicy:
         identity_provider=None,
         max_rotate_attempts: int = 2,
         transport=None,
+        per_host_concurrency: int | None = None,
+        metrics=None,
     ):
         self.scope = scope
         self.rate = float(rate)
         self.max_concurrency = max_concurrency
         self._sem = asyncio.Semaphore(max_concurrency)
+        #: Faza 1 (§5): host başına concurrency tavanı. `None` → qlobal tavanla
+        #: eyni (köhnə davranış: tək host bütün qlobal tutumu işğal edə bilər).
+        #: Konfiqurasiya ilə aşağı salındıqda host-lar bir-birindən izolyasiya
+        #: olunur; HEÇ VAXT qlobal tavanı aşmır və RPS ARTIRILMIR.
+        self.per_host_concurrency = (max(1, int(per_host_concurrency))
+                                     if per_host_concurrency else max_concurrency)
+        self._host_sems: dict[str, asyncio.Semaphore] = {}
+        #: Faza 1 (§6.1): host-a xas RATE faktoru (default 1.0). Guardian
+        #: eskalasiyası YALNIZ müvafiq hostun rate-ini azaldır — digər hostların
+        #: konfiqurasiya olunmuş rate-i TOXUNULMAZ qalır.
+        self._host_rate: dict[str, float] = {}
         self.connect_timeout = connect_timeout
         self.total_timeout = total_timeout
         self.max_retries = max(0, int(max_retries))
@@ -132,6 +150,8 @@ class HttpPolicy:
         #: `available` False olduqda şəffaf şəkildə aiohttp istifadə olunur.
         self.transport = transport
         self.transport_requests = 0
+        #: Faza 0 (§3): skan-scoped, bounded metrika kollektoru (opsional).
+        self.metrics = metrics
         self._state: dict[str, _HostState] = defaultdict(_HostState)
         self.block_events: list[BlockEvent] = []
         self.rotation_events: list[dict] = []
@@ -144,16 +164,79 @@ class HttpPolicy:
         return "respect"
 
     # ---------------- rate limiting + cooldown ----------------
+    def host_rate_factor(self, host: str) -> float:
+        """Host üçün cari rate faktoru (Guardian eskalasiyası host-a xasdır)."""
+        return self._host_rate.get(host, 1.0)
+
+    def set_host_rate_factor(self, host: str, factor: float) -> None:
+        """YALNIZ `host` üçün rate faktorunu təyin edir (1.0 = bərpa).
+
+        Digər hostların rate-i TOXUNULMAZ qalır — blok bir hostdan digərinə
+        sızmır (Faza 1, §6.1).
+        """
+        f = float(factor)
+        if f >= 1.0:
+            self._host_rate.pop(host, None)
+        else:
+            self._host_rate[host] = max(0.01, f)
+
+    def effective_rate(self, host: str) -> float:
+        """Host üçün faktiki rate (base × host faktoru) — HƏMİŞƏ base-dən böyük deyil."""
+        return max(0.1, self.rate * self.host_rate_factor(host))
+
     async def _wait_rate(self, host: str) -> None:
         st = self._state[host]
         while True:
             now = time.monotonic()
-            st.tokens = min(self.rate, st.tokens + (now - st.last) * self.rate)
+            rate = self.effective_rate(host)
+            st.tokens = min(rate, st.tokens + (now - st.last) * rate)
             st.last = now
             if st.tokens >= 1:
                 st.tokens -= 1
                 return
-            await asyncio.sleep(max(0.01, (1 - st.tokens) / self.rate))
+            await asyncio.sleep(max(0.01, (1 - st.tokens) / rate))
+
+    def _host_sem(self, host: str) -> asyncio.Semaphore:
+        """Host-a xas concurrency semaforu (lazy, aktiv loop daxilində)."""
+        sem = self._host_sems.get(host)
+        if sem is None:
+            sem = asyncio.Semaphore(self.per_host_concurrency)
+            self._host_sems[host] = sem
+        return sem
+
+    @asynccontextmanager
+    async def _slot(self, host: str):
+        """İki səviyyəli concurrency slotu (Faza 1, §5.1).
+
+        Ardıcıllıq: ƏVVƏL host slotu, SONRA qlobal slot. Əks sıra qlobal
+        tutumun aclığa (starvation) səbəb ola bilər: qlobal slot tutub host
+        slotunu gözləmək digər hostları bloklayır. Host→qlobal sırasında
+        qlobal slot tutan tapşırıq HEÇ VAXT host slotu gözləmir → dövrəli
+        gözləmə (deadlock) mümkün deyil. Hər iki slot `finally` ilə, exception
+        və ləğv daxil olmaqla, HƏMİŞƏ azad edilir.
+        """
+        hsem = self._host_sem(host)
+        t_host = time.monotonic()
+        await hsem.acquire()
+        if self.metrics is not None:
+            self.metrics.record_host_wait(time.monotonic() - t_host)
+            self.metrics.enter_host(host)
+        try:
+            t_global = time.monotonic()
+            await self._sem.acquire()
+            if self.metrics is not None:
+                self.metrics.record_global_wait(time.monotonic() - t_global)
+                self.metrics.enter_global()
+            try:
+                yield
+            finally:
+                self._sem.release()
+                if self.metrics is not None:
+                    self.metrics.exit_global()
+        finally:
+            hsem.release()
+            if self.metrics is not None:
+                self.metrics.exit_host(host)
 
     def is_halted(self, host: str) -> bool:
         st = self._state[host]
@@ -173,10 +256,15 @@ class HttpPolicy:
                 f"({self.halt_remaining(host):.0f}s qalıb) — sorğu göndərilmir")
         await self._wait_rate(host)
 
-    def record(self, host: str, status: int, headers: dict | None = None) -> None:
+    def record(self, host: str, status: int, headers: dict | None = None,
+               *, sink: list | None = None) -> None:
         """HTTP cavabını qeyd edir. 403/429 → target dayandırılır (evasion YOX).
 
         429 üçün `Retry-After` başlığı hörmətlə qarşılanır.
+
+        `sink` verilərsə, yaranan `BlockEvent` həm qlobal audit siyahısına, həm
+        də `sink`-ə əlavə olunur → zəng edən sorğu YALNIZ öz hadisələrini görür
+        (konkurent atribusiya, §6.3).
         """
         st = self._state[host]
         if status in (403, 429):
@@ -195,6 +283,8 @@ class HttpPolicy:
             ev = BlockEvent(host, status, datetime.now(timezone.utc).isoformat(),
                             f"{reason}; hədəf {wait:.0f}s dayandırıldı{note}")
             self.block_events.append(ev)
+            if sink is not None:
+                sink.append(ev)
             print(f"   [⛔] {host}: HTTP {status} → {wait:.0f}s cooldown "
                   f"(strategiya: {self._block_strategy(status)})")
         elif 200 <= status < 400:
@@ -231,6 +321,9 @@ class HttpPolicy:
         rotate_attempts = 0
         current = url
         redirects = 0
+        #: Faza 1 (§6.3): MƏHZ bu sorğu zamanı yaranan blok hadisələri —
+        #: konkurent atribusiya üçün `record(..., sink=events)` ilə toplanır.
+        events: list[BlockEvent] = []
 
         while True:
             attempt_headers = headers
@@ -244,8 +337,12 @@ class HttpPolicy:
                         call_kwargs["proxy"] = px
             try:
                 status, head, text, truncated, elapsed = await self._fetch_once(
-                    session, method, current, attempt_headers, call_kwargs)
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                    session, method, current, attempt_headers, call_kwargs, host)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                if self.metrics is not None:
+                    self.metrics.record_error(
+                        "timeout" if isinstance(exc, asyncio.TimeoutError)
+                        else "connection")
                 attempt += 1
                 if attempt > max_tries:
                     raise
@@ -286,19 +383,22 @@ class HttpPolicy:
                             await self.acquire(host)
                             continue
                     # rotasiya mümkün olmadı → cooldown + (lazımdırsa) bypass işarəsi
-                    self.record(host, status, head)
+                    self.record(host, status, head, sink=events)
                     raise TargetBlocked(
                         f"{host}: HTTP {status} → "
                         + ("bypass matrisi tələb olunur" if strategy == "escalate_bypass"
                            else "cooldown aktivdir"),
-                        suggest_bypass=(strategy == "escalate_bypass"))
+                        suggest_bypass=(strategy == "escalate_bypass"),
+                        block_events=events)
                 # respect / backoff → klassik cooldown
-                self.record(host, status, head)
+                self.record(host, status, head, sink=events)
                 if self.is_halted(host):
-                    raise TargetBlocked(f"{host}: HTTP {status} → cooldown aktivdir")
+                    raise TargetBlocked(
+                        f"{host}: HTTP {status} → cooldown aktivdir",
+                        block_events=events)
 
             if observe_block or status not in (403, 429):
-                self.record(host, status, head)
+                self.record(host, status, head, sink=events)
             return HttpResponse(status, head, text, current, elapsed, truncated)
 
     def _use_transport(self) -> bool:
@@ -307,14 +407,17 @@ class HttpPolicy:
         return t is not None and bool(getattr(t, "available", False))
 
     async def _fetch_once(self, session, method: str, url: str, headers,
-                          call_kwargs) -> tuple:
+                          call_kwargs, host: str) -> tuple:
         """Bir HTTP cəhdi — transport varsa onunla, yoxsa aiohttp ilə.
 
         Faza 2.1: hədəfə gedən BÜTÜN native HTTP trafiki (mümkün olduqda)
         təqlid edən TLS/HTTP2 transportundan keçir; əks halda şəffaf şəkildə
         aiohttp istifadə olunur (heç bir səssiz davranış dəyişikliyi yoxdur).
+
+        Faza 1 (§5): concurrency slotu BURADA — host səviyyəsi, sonra qlobal
+        səviyyə — tutulur və gövdə oxunması daxil olmaqla bütün cəhdi əhatə edir.
         """
-        async with self._sem:
+        async with self._slot(host):
             started = time.monotonic()
             if self._use_transport():
                 tr = await self.transport.request(
@@ -322,8 +425,12 @@ class HttpPolicy:
                     proxy=call_kwargs.get("proxy"),
                     timeout=self.total_timeout)
                 self.transport_requests += 1
+                elapsed = time.monotonic() - started
+                if self.metrics is not None:
+                    self.metrics.record_request(
+                        host, tr.status, elapsed, transport=True)
                 return (tr.status, dict(tr.headers), tr.text, tr.truncated,
-                        time.monotonic() - started)
+                        elapsed)
             timeout = aiohttp.ClientTimeout(
                 total=self.total_timeout, connect=self.connect_timeout)
             async with session.request(
@@ -332,8 +439,11 @@ class HttpPolicy:
                 status = resp.status
                 head = dict(resp.headers)
                 text, truncated = await self._read_body(resp)
-                return (status, head, text, truncated,
-                        time.monotonic() - started)
+            elapsed = time.monotonic() - started
+            if self.metrics is not None:
+                self.metrics.record_request(
+                    host, status, elapsed, transport=False)
+            return (status, head, text, truncated, elapsed)
 
     async def _read_body(self, resp: aiohttp.ClientResponse):
         try:
@@ -362,6 +472,7 @@ class HttpPolicy:
             "blocked_hosts": sorted({e.host for e in self.block_events}),
             "rate": self.rate,
             "max_concurrency": self.max_concurrency,
+            "per_host_concurrency": self.per_host_concurrency,
             "rotations": len(self.rotation_events),
             "block_429": self.block_429,
             "block_403": self.block_403,

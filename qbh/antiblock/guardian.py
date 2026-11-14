@@ -34,9 +34,13 @@ class Guardian:
                  ladder: EscalationLadder | None = None):
         self.ids = identity_mgr
         self.policy = policy
+        #: Skan-üzrə TƏHLÜKƏSİZLİK qapısı (intrusiv fazaların təxirə salınması).
+        #: QƏSDƏN qlobaldır: bir hostda ciddi blok bütün skan üzrə intrusiv
+        #: fazaları ehtiyatlı şəkildə saxlayır (§6.2).
         self.ladder = ladder or EscalationLadder()
-        #: Nərdivanın gəldiyi yerdə rate-i bərpa etmək üçün əsas dəyər.
-        self._base_rate = float(policy.rate)
+        #: Host-a xas eskalasiya (YALNIZ həmin hostun rate-ini azaldır).
+        #: Beləcə Host A-nın bloku Host B-nin rate-inə təsir ETMİR (§6.1).
+        self._host_ladders: dict[str, EscalationLadder] = {}
         self.ladder_audit: list[dict] = []
         #: Aşkarlanmış WAF adı (Faza 2.2) — nərdivan qərarlarını zənginləşdirir.
         self.waf_name = ""
@@ -56,37 +60,62 @@ class Guardian:
         """HTTP cavabını qeyd edir (adaptiv strategiya HttpPolicy-də tətbiq olunur)."""
         self.policy.record(host, status)
 
-    def _note_blocks(self, before: int) -> None:
-        """Policy-də yaranan YENİ blok hadisələrini nərdivana ötürür."""
-        for ev in self.policy.block_events[before:]:
-            dec = self.ladder.on_block(ev.status, waf=self.waf_name)
-            self._apply(dec)
+    # ---- host-a xas eskalasiya (rate izolyasiyası) ----
+    def _host_ladder(self, host: str) -> EscalationLadder:
+        hl = self._host_ladders.get(host)
+        if hl is None:
+            hl = EscalationLadder()
+            self._host_ladders[host] = hl
+        return hl
 
-    def _apply(self, dec) -> None:
-        """Nərdivan qərarını FAKTİKİ nəzarətə çevirir (sadəcə log deyil)."""
-        self.ladder_audit.append(dec.to_dict())
-        if dec.rate_factor < 1.0:
-            self.policy.rate = max(0.1, self._base_rate * dec.rate_factor)
-        else:
-            self.policy.rate = self._base_rate
-        if dec.defer_intrusive:
-            print("   [⛔] Guardian: intrusiv fazalar görünürlük düzələnə "
-                  "qədər təxirə salınır (stealth_mode)")
+    def _note_events(self, events) -> None:
+        """MƏHZ bu sorğuya aid BLOK hadisələrini nərdivanlara ötürür (§6.3).
+
+        Hadisələr `TargetBlocked.block_events`-dən gəlir (paylaşılan
+        `policy.block_events` dilimindən DEYİL) → konkurentlikdə hər hadisə
+        öz hostuna dəqiq aid edilir. İki təsir:
+          1. Skan-üzrə təhlükəsizlik qapısı (`self.ladder`) — intrusiv təxirə,
+          2. Host-a xas rate eskalasiyası — YALNIZ `ev.host`-un rate-i azalır.
+        """
+        for ev in events:
+            gdec = self.ladder.on_block(ev.status, waf=self.waf_name)
+            hl = self._host_ladder(ev.host)
+            hdec = hl.on_block(ev.status, waf=self.waf_name)
+            self.policy.set_host_rate_factor(ev.host, hdec.rate_factor)
+            self.ladder_audit.append(hdec.to_dict())
+            if gdec.defer_intrusive:
+                print("   [⛔] Guardian: intrusiv fazalar görünürlük düzələnə "
+                      "qədər təxirə salınır (stealth_mode)")
+
+    def _on_host_success(self, host: str) -> None:
+        """Uğurlu cavab → YALNIZ bu hostun nərdivanı bir pillə aşağı (§6.2).
+
+        Host B-nin uğuru Host A-nın blok/eskalasiya vəziyyətini və ya
+        cooldown-unu TƏMİZLƏMİR.
+        """
+        hl = self._host_ladders.get(host)
+        if hl is None or hl.blocks == 0:
+            return
+        hl.on_success()
+        self.policy.set_host_rate_factor(host, hl.rate_factor)
 
     async def request(self, session, method: str, url: str, **kwargs) -> HttpResponse:
         extra = kwargs.pop("headers", None)
-        if extra:
+        try:
             host = extract_host(url)
+        except Exception:  # noqa: BLE001 - etibarsız URL → policy öz xətasını atır
+            host = ""
+        if extra:
             merged = dict(self.ids.headers_for(host))
             merged.update(extra)
             kwargs["headers"] = merged
-        before = len(self.policy.block_events)
         try:
             resp = await self.policy.request(session, method, url, **kwargs)
-        except TargetBlocked:
-            self._note_blocks(before)
+        except TargetBlocked as exc:
+            # Konkurentlik-təhlükəsiz atribusiya: yalnız BU sorğunun hadisələri.
+            self._note_events(getattr(exc, "block_events", ()))
             raise
-        self._note_blocks(before)
+        self._on_host_success(host)
         if not self.ladder.blocked:
             self.ladder.on_success()
         return resp

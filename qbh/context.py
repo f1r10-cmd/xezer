@@ -22,10 +22,13 @@ class Context:
     egress_audit: list = field(default_factory=list)
     #: Aşkarlanmış WAF adı (Faza 2.2) — SQLi/SSTI tamper seçimi üçün.
     waf_name: str = ""
+    #: Faza 0 (§3): skan-scoped HTTP metrikaları (HttpPolicy ilə paylaşılır).
+    metrics: Any = None
     _egress: Any = None
     _oob: Any = None
     _stealth: Any = None
     _vault: Any = None
+    _scan_session: Any = None
 
     def _auth(self):
         """Authorization yoxdursa konfiqdən təmin edir (fail-closed)."""
@@ -106,6 +109,54 @@ class Context:
         if cli is None:
             return base
         return max(0.1, min(float(cli), base))
+
+    @property
+    def scan_session(self):
+        """Skan-scoped, təkrar istifadə olunan HTTP sessiya meneceri (Faza 1, §4).
+
+        LAZY yaradılır (aktiv event loop daxilində) — modul import zamanı və ya
+        modul-qlobal sessiya YOXDUR. `Conductor` hər skan üçün təzə `Context`
+        yaradır → sessiyalar skanlar arasında PAYLAŞILMIR. Sahib `Context`-dir;
+        bağlanma `Conductor._pipeline`-in `finally`-i ilə təmin olunur.
+        """
+        if self._scan_session is None:
+            from .http_session import ScanSession
+
+            lim = self.limits
+            per_host = getattr(lim, "per_host_concurrency", None)
+            if not per_host:
+                per_host = int(self.cfg.effective_concurrency)
+            self._scan_session = ScanSession(
+                total_limit=int(self.cfg.effective_concurrency),
+                per_host_limit=int(per_host),
+                connect_timeout=float(lim.connect_timeout),
+                total_timeout=float(lim.total_timeout),
+                metrics=self.metrics)
+        return self._scan_session
+
+    def http_session(self):
+        """Uyğun native mühərriklər üçün paylaşılan `aiohttp.ClientSession`.
+
+        Aktiv event loop daxilində çağırılmalıdır (lazy yaradılır).
+        """
+        return self.scan_session.session
+
+    def http_session_cm(self):
+        """`async with ... as session:` üçün paylaşılan sessiya konteksti.
+
+        Mühərriklərin mövcud `async with aiohttp.ClientSession() as session:`
+        quruluşunu KORUYUR, lakin skan-scoped paylaşılan sessiyanı verir və
+        çıxışda onu BAĞLAMIR (sahib `Context`-dir). Bu, TCP bağlantılarının
+        skan boyu təkrar istifadəsini təmin edir.
+        """
+        from .http_session import _SharedSessionCM
+
+        return _SharedSessionCM(self.http_session())
+
+    async def aclose(self) -> None:
+        """Sessiyanı bağlayır (uğur, xəta, exception və ləğv halında çağırılır)."""
+        if self._scan_session is not None:
+            await self._scan_session.aclose()
 
     @property
     def limits(self):

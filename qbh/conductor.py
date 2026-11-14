@@ -49,6 +49,7 @@ from .engines.wafdetect import WafDetectEngine
 from .engines.xss import XSSEngine
 from .http_policy import HttpPolicy
 from .installer import check_tools, format_report, install_tools
+from .metrics import ScanMetrics
 from .report import generator
 from .results import EngineResult, StageResult, now_iso
 from .scope import ScopeError
@@ -71,6 +72,8 @@ class Conductor:
         cli_rate = getattr(args, "rate", None)
         if cli_rate:
             eff_rate = max(0.1, min(float(cli_rate), eff_rate))
+        # Faza 0 (§3): skan-scoped, bounded HTTP metrikaları.
+        self.metrics = ScanMetrics()
         policy = HttpPolicy(
             cfg.scope,
             rate=eff_rate,
@@ -81,6 +84,8 @@ class Conductor:
             max_redirects=int(cfg.profile.get("max_redirects", 20)),
             block_429=cfg.block_strategy.http_429,
             block_403=cfg.block_strategy.http_403,
+            per_host_concurrency=getattr(lim, "per_host_concurrency", None),
+            metrics=self.metrics,
         )
         self.policy = policy
         self.proxies = ProxyManager(getattr(args, "proxy", "off"), cfg.proxy_file)
@@ -101,7 +106,8 @@ class Conductor:
         self.chain = None
 
         self.ctx = Context(cfg=cfg, args=args, guardian=self.guardian,
-                           scan_id=None, authorization=self.authorization)
+                           scan_id=None, authorization=self.authorization,
+                           metrics=self.metrics)
         # Faza 2.1: hədəfə gedən native HTTP trafiki TLS təqlidi transportundan
         # keçir (curl_cffi yoxdursa transport `available=False` → aiohttp).
         self.policy.transport = self.ctx.stealth.transport
@@ -332,6 +338,7 @@ class Conductor:
                     "ladder": self.guardian.ladder_state(),
                     "stealth": self.ctx.stealth.summary(),
                     "chain_audit": self.chain.audit() if self.chain else {},
+                    "metrics": self.metrics.snapshot(),
                 })
         except Exception:  # noqa: BLE001 - hesabat yaradılmasa da pipeline bitməlidir
             print("[!] Hesabat yaradıla bilmədi:")
@@ -405,6 +412,10 @@ class Conductor:
             raise
         finally:
             await self.ctx.oob.stop()
+            # Faza 1 (§4): skan-scoped sessiya HƏMİŞƏ bağlanır — uğur, xəta,
+            # exception və ləğv (CancelledError) halında. `finally` blokunda
+            # olduğu üçün heç bir halda açıq qalmır.
+            await self.ctx.aclose()
             if status != "cancelled":
                 if self.failed_stages:
                     status = "partial" if len(self.failed_stages) < len(self.stages) \

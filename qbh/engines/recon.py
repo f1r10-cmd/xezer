@@ -14,12 +14,19 @@ from .. import db
 from ..adapters.base import run_process
 from ..antiblock.ua_rotator import ua_for
 from ..installer import resolve_httpx
+from ..parallel import run_bounded
 from ..redact import redact
 from ..results import EngineResult
 from ..scope import ScopeError, normalize_host
 
 #: Uğursuz alt-prosesin stderr-indən loglara yazılan maksimum simvol sayı.
 _STDERR_LIMIT = 400
+
+#: Faza 1 (§7): paralel naabu/katana alt-proseslərinin tavanları. Hər host
+#: müstəqildir və hər alət öz rate limitini hörmət edir; subprocess-lər
+#: `HttpPolicy` semaforundan keçmədiyi üçün tavanlar KİÇİK saxlanılır.
+NAABU_PARALLEL = 3
+CRAWL_PARALLEL = 4
 
 
 def _stderr_excerpt(raw: bytes, limit: int = _STDERR_LIMIT) -> str:
@@ -197,6 +204,8 @@ class ReconEngine:
         plan = self.ctx.stealth.plan(
             self.rate * 10, base_concurrency=30, phase="ports")
         rate = plan.rate_arg()
+        # Əvvəlcə cooldown/scope yoxlaması + hədəf seçimi (deterministik).
+        targets: list[tuple[dict, str]] = []
         for h in alive[:30]:
             if self._skip(h["host"], res):
                 continue
@@ -206,10 +215,26 @@ class ReconEngine:
             # IP scope-da deyilsə (yalnız host icazəlidirsə) DNS adı ilə davam et
             if not self.cfg.in_scope(target):
                 target = h["host"]
-            ports = await self._naabu_scan(target, rate)
+            targets.append((h, target))
+        if not targets:
+            return
+        # Faza 1 (§7): host-lar MÜSTƏQİLDİR → MƏHDUD paralel port taraması.
+        limit = max(1, min(NAABU_PARALLEL, len(targets)))
+
+        async def _one(item):
+            h, target = item
+            return h, await self._naabu_scan(target, rate)
+
+        outcomes = await run_bounded(targets, _one, limit=limit)
+        missing = False
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"naabu: gözlənilməz xəta — {outcome}")
+                continue
+            h, ports = outcome
             if ports is None:            # naabu yoxdur → dürüst xəbərdarlıq
-                self._warn_missing(res, "naabu", "port taraması atlandı")
-                break
+                missing = True
+                continue
             if ports:
                 db.insert_finding(
                     h["id"], "recon", "info",
@@ -219,6 +244,8 @@ class ReconEngine:
                     evidence=", ".join(ports), confidence=0.6,
                     source="naabu", scan_id=self.ctx.scan_id)
                 res.findings += 1
+        if missing:
+            self._warn_missing(res, "naabu", "port taraması atlandı")
 
     @staticmethod
     async def _naabu_scan(target: str, rate: int = 30) -> list[str] | None:
@@ -240,21 +267,24 @@ class ReconEngine:
         return sorted(p for p in ports if p and p != "None")
 
     async def _crawl(self, alive: list[dict], res: EngineResult):
-        for h in alive[:20]:
-            if self._skip(h["host"], res):
-                continue
-            url = h.get("url")
-            if not url:
-                continue
+        # Əvvəlcə cooldown yoxlaması + URL-i olan hostların seçimi (deterministik).
+        items = [h for h in alive[:20]
+                 if h.get("url") and not self._skip(h["host"], res)]
+        if not items:
+            return
+        # Faza 1 (§7): host-lar MÜSTƏQİLDİR → MƏHDUD paralel katana crawl.
+        limit = max(1, min(CRAWL_PARALLEL, len(items)))
+
+        async def _one(h):
+            url = h["url"]
             r = await run_process(
                 ["katana", "-u", url, "-d", "3", "-js-crawl", "-silent",
                  "-no-color", "-fs", "rdn",
                  "-H", f"User-Agent: {ua_for(h['host'])}"], timeout=300)
             if r.missing:
-                self._warn_missing(res, "katana", "crawl atlandı")
-                continue
+                return "missing"
             if r.timed_out:
-                continue
+                return None
             n = 0
             for line in r.stdout.decode(errors="ignore").splitlines():
                 u = line.strip().strip('"')
@@ -271,6 +301,14 @@ class ReconEngine:
                 n += 1
             if n:
                 print(f"[+] katana {h['host']}: {n} URL")
+            return None
+
+        outcomes = await run_bounded(items, _one, limit=limit)
+        if any(o == "missing" for o in outcomes):
+            self._warn_missing(res, "katana", "crawl atlandı")
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"crawl: gözlənilməz xəta — {outcome}")
 
     async def _gau(self, domain: str, res: EngineResult):
         r = await run_process(["gau", domain, "--threads", "5"], timeout=180)

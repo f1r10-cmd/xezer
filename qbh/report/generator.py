@@ -369,6 +369,38 @@ def generate(severity_min: str = "low", stages=None, meta=None) -> str | None:
     L += ["## 14. Skan Məhdudiyyətləri", ""]
     for lim in LIMITATIONS:
         L.append(f"- {_esc(lim)}")
+    metrics = meta.get("metrics") or {}
+    if metrics:
+        lat = metrics.get("latency") or {}
+        gw = metrics.get("global_sem_wait") or {}
+        hw = metrics.get("host_sem_wait") or {}
+        L += ["", "**HTTP performans metrikaları (skan-scoped, Faza 0):**", "",
+              f"- Sorğu sayı: **{metrics.get('requests_total', 0)}** "
+              f"(aiohttp: {metrics.get('aiohttp_requests', 0)}, "
+              f"impersonate: {metrics.get('transport_requests', 0)})",
+              f"- Gecikmə P50/P95: **{lat.get('p50_ms', 0)}ms / "
+              f"{lat.get('p95_ms', 0)}ms** (maks {lat.get('max_ms', 0)}ms)",
+              f"- Qlobal semafor gözləmə P95: "
+              f"**{gw.get('p95_ms', 0)}ms** · maks {gw.get('max_ms', 0)}ms",
+              f"- Host semafor gözləmə P95: "
+              f"**{hw.get('p95_ms', 0)}ms** · maks {hw.get('max_ms', 0)}ms",
+              f"- Maks qlobal paralellik: **{metrics.get('max_global_concurrency', 0)}**",
+              f"- Sessiya: yaradıldı {metrics.get('sessions_created', 0)}, "
+              f"bağlandı {metrics.get('sessions_closed', 0)}",
+              f"- Timeout: {metrics.get('timeouts', 0)} · "
+              f"bağlantı xətası: {metrics.get('connection_errors', 0)}"]
+        per_host = metrics.get("requests_by_host") or {}
+        if per_host:
+            parts = [f"{_code(h, 60)}={n}" for h, n in per_host.items()]
+            L.append("- Sorğular (host üzrə): " + ", ".join(parts))
+        by_status = metrics.get("requests_by_status") or {}
+        if by_status:
+            parts = [f"{_code(s, 10)}={n}" for s, n in by_status.items()]
+            L.append("- Sorğular (status üzrə): " + ", ".join(parts))
+        max_host = metrics.get("max_host_concurrency") or {}
+        if max_host:
+            parts = [f"{_code(h, 60)}={n}" for h, n in max_host.items()]
+            L.append("- Maks host paralelliyi: " + ", ".join(parts))
     block_audit = meta.get("block_audit") or []
     if block_audit:
         L += ["", "**Blok hadisələri (adaptiv strategiya tətbiq olundu):**", ""]

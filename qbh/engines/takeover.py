@@ -22,6 +22,7 @@ import aiohttp
 
 from .. import db
 from ..http_policy import TargetBlocked
+from ..parallel import concurrency_limit, run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
 
@@ -107,18 +108,32 @@ class TakeoverEngine:
             return res.skip("yaşayan host yoxdur — takeover yoxlaması atlandı")
         print(f"[═══ CNAME TAKEOVER ═══] {len(hosts)} host")
 
-        async with aiohttp.ClientSession() as session:
-            for row in hosts[:self.max_hosts]:
-                host = row["subdomain"]
-                if not self.cfg.in_scope(host):
-                    continue
-                if self.guardian and self.guardian.halted(host):
-                    res.warn(f"{host} cooldown altındadır — atlandı")
-                    continue
-                try:
-                    await self._check(session, row, res)
-                except (TargetBlocked, ScopeError) as exc:
-                    res.warn(f"{host}: {exc}")
+        selected = hosts[:self.max_hosts]
+        # Faza 1 (§4/§7): skan-scoped paylaşılan sessiya + host-lar üzərində
+        # MƏHDUD paralel işçilər. Hər host müstəqildir (DNS + opsional HTTP);
+        # HTTP sorğuları yenə Guardian/HttpPolicy (scope + rate + cooldown)
+        # qapısından keçir.
+        session = self.ctx.http_session()
+        limit = concurrency_limit(self.cfg, len(selected))
+
+        async def _one(row):
+            host = row["subdomain"]
+            if not self.cfg.in_scope(host):
+                return None
+            if self.guardian and self.guardian.halted(host):
+                return f"{host} cooldown altındadır — atlandı"
+            try:
+                await self._check(session, row, res)
+            except (TargetBlocked, ScopeError) as exc:
+                return f"{host}: {exc}"
+            return None
+
+        outcomes = await run_bounded(selected, _one, limit=limit)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"takeover: gözlənilməz xəta — {outcome}")
+            elif outcome:
+                res.warn(outcome)
         res.data = {"checked": min(len(hosts), self.max_hosts)}
         return res
 

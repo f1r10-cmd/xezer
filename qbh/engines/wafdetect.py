@@ -29,6 +29,7 @@ import secrets
 
 from .. import db
 from ..http_policy import TargetBlocked
+from ..parallel import concurrency_limit, run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
 from ..service_url import (KIND_TIMEOUT, ServiceResolver, failure_label)
@@ -52,67 +53,86 @@ class WafDetectEngine:
             return res.skip("yaşayan host yoxdur — WAF aşkarlaması atlandı")
         print(f"[═══ M-WAF AŞKARLAMA ═══] {len(hosts)} host")
 
-        import aiohttp
+        if not self.guardian:
+            res.fail("guardian yoxdur — WAF aşkarlaması icra oluna bilməz")
+            return res
         active = self.ctx.allows("active_fuzz")
+        resolver = ServiceResolver(self.guardian)
+        # Faza 1 (§4/§7): skan-scoped paylaşılan sessiya + host-lar üzərində
+        # MƏHDUD paralel işçilər. Hər host müstəqildir; bütün sorğular yenə
+        # HttpPolicy (scope + host RPS + concurrency + cooldown) qapısından keçir.
+        session = self.ctx.http_session()
+        limit = concurrency_limit(self.cfg, len(hosts))
+
+        async def _one(row):
+            host = row["subdomain"]
+            if self.guardian.halted(host):
+                return {"kind": "cooldown", "host": host}
+            try:
+                hint = db.scheme_hint(row["id"], self.ctx.scan_id)
+                ep = await resolver.resolve(session, host, hint=hint)
+            except TargetBlocked as exc:
+                return {"kind": "warn", "msg": str(exc)}
+            except ScopeError as exc:
+                return {"kind": "warn", "msg": f"{host}: {exc}"}
+            if not ep.ok:
+                return {"kind": "resolve_fail", "host": host,
+                        "timeout": ep.kind == KIND_TIMEOUT,
+                        "label": failure_label(ep.kind)}
+            try:
+                profile, err = await self._probe(session, ep, active)
+            except TargetBlocked as exc:
+                return {"kind": "warn", "msg": str(exc)}
+            except ScopeError as exc:
+                return {"kind": "warn", "msg": f"{host}: {exc}"}
+            return {"kind": "probe", "host": host, "profile": profile,
+                    "err": err}
+
+        outcomes = await run_bounded(hosts, _one, limit=limit)
         profiles: dict[str, dict] = {}
         checked = skipped = timed_out = 0
-        resolver = ServiceResolver(self.guardian)
-        async with aiohttp.ClientSession() as session:
-            for row in hosts:
-                host = row["subdomain"]
-                if self.guardian and self.guardian.halted(host):
-                    res.warn(f"{host} cooldown altındadır — atlandı")
-                    skipped += 1
-                    continue
-                if not self.guardian:
-                    res.fail("guardian yoxdur — WAF aşkarlaması icra oluna bilməz")
-                    return res
-                try:
-                    hint = db.scheme_hint(row["id"], self.ctx.scan_id)
-                    ep = await resolver.resolve(session, host, hint=hint)
-                except TargetBlocked as exc:
-                    res.warn(str(exc))
-                    skipped += 1
-                    continue
-                except ScopeError as exc:
-                    res.warn(f"{host}: {exc}")
-                    skipped += 1
-                    continue
-                if not ep.ok:
-                    if ep.kind == KIND_TIMEOUT:
-                        timed_out += 1
-                    else:
-                        skipped += 1
-                    res.warn(f"{host}: {failure_label(ep.kind)} — WAF "
-                             "aşkarlaması atlandı")
-                    continue
-
-                try:
-                    profile, err = await self._probe(session, ep, active)
-                except TargetBlocked as exc:
-                    res.warn(str(exc))
-                    skipped += 1
-                    continue
-                except ScopeError as exc:
-                    res.warn(f"{host}: {exc}")
-                    skipped += 1
-                    continue
-                if err is not None:
-                    if err == KIND_TIMEOUT:
-                        timed_out += 1
-                        res.warn(f"{host}: timeout — WAF aşkarlaması "
-                                 f"natamam (təyin: {profile.name})")
-                    else:
-                        skipped += 1
-                        res.warn(f"{host}: {failure_label(err)} — WAF "
-                                 f"aşkarlaması natamam (təyin: {profile.name})")
+        # Deterministik birləşdirmə (host sırası): WAF qeydi və xəbərdarlıqlar
+        # paralel tamamlanma sırasından ASILI olmur.
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"wafdetect: gözlənilməz xəta — {outcome}")
+                continue
+            kind = outcome["kind"]
+            if kind == "cooldown":
+                res.warn(f"{outcome['host']} cooldown altındadır — atlandı")
+                skipped += 1
+                continue
+            if kind == "warn":
+                res.warn(outcome["msg"])
+                skipped += 1
+                continue
+            if kind == "resolve_fail":
+                if outcome["timeout"]:
+                    timed_out += 1
                 else:
-                    checked += 1
-                if profile.detected:
-                    self.ctx.note_waf(profile)
-                    profiles[host] = profile.to_dict()
-                    print(f"   [🛡] {host}: {profile.name} "
-                          f"(güvən {profile.confidence:.2f})")
+                    skipped += 1
+                res.warn(f"{outcome['host']}: {outcome['label']} — WAF "
+                         "aşkarlaması atlandı")
+                continue
+            host = outcome["host"]
+            profile = outcome["profile"]
+            err = outcome["err"]
+            if err is not None:
+                if err == KIND_TIMEOUT:
+                    timed_out += 1
+                    res.warn(f"{host}: timeout — WAF aşkarlaması "
+                             f"natamam (təyin: {profile.name})")
+                else:
+                    skipped += 1
+                    res.warn(f"{host}: {failure_label(err)} — WAF "
+                             f"aşkarlaması natamam (təyin: {profile.name})")
+            else:
+                checked += 1
+            if profile.detected:
+                self.ctx.note_waf(profile)
+                profiles[host] = profile.to_dict()
+                print(f"   [🛡] {host}: {profile.name} "
+                      f"(güvən {profile.confidence:.2f})")
         if self.ctx.waf_name:
             self.guardian.waf_name = self.ctx.waf_name
         res.hosts = checked

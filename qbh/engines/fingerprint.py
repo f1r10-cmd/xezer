@@ -20,6 +20,7 @@ import yaml
 
 from .. import db
 from ..http_policy import TargetBlocked
+from ..parallel import concurrency_limit, run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
 from ..service_url import ServiceResolver, failure_label
@@ -57,53 +58,72 @@ class FingerprintEngine:
         print(f"[═══ M2 FINGERPRINT ═══] {len(hosts)} host")
 
         resolver = ServiceResolver(self.guardian)
-        for row in hosts:
+        # Faza 1 (§4/§7): skan-scoped PAYLAŞILAN sessiya (TCP təkrar istifadə) və
+        # host-lar üzərində MƏHDUD paralel işçilər. Hər host müstəqildir; bütün
+        # sorğular yenə HttpPolicy (scope + host RPS + concurrency + cooldown)
+        # qapısından keçir → trafik ARTIRILMIR.
+        session = self.ctx.http_session()
+        limit = concurrency_limit(self.cfg, len(hosts))
+
+        async def _one(row):
             host = row["subdomain"]
             if self.guardian and self.guardian.halted(host):
-                res.warn(f"{host} cooldown altındadır — atlandı")
-                continue
+                return (f"{host} cooldown altındadır — atlandı", None)
             try:
-                await self._fingerprint(row, res, resolver)
+                tech = await self._fingerprint(row, res, resolver, session)
             except TargetBlocked as exc:
-                res.warn(str(exc))
+                return (str(exc), None)
             except ScopeError as exc:
-                res.warn(f"{host}: {exc}")
+                return (f"{host}: {exc}", None)
+            return (None, tech)
+
+        outcomes = await run_bounded(hosts, _one, limit=limit)
+        techs_out: list[dict] = []
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"fingerprint: gözlənilməz xəta — {outcome}")
+                continue
+            warn, tech = outcome
+            if warn:
+                res.warn(warn)
+            if tech:
+                techs_out.append(tech)
+        if techs_out:
+            res.data.setdefault("technologies", []).extend(techs_out)
         return res
 
     async def _fingerprint(self, row, res: EngineResult,
-                           resolver: ServiceResolver) -> None:
-        import aiohttp
+                           resolver: ServiceResolver, session) -> dict | None:
         host = row["subdomain"]
-        async with aiohttp.ClientSession() as session:
-            hint = db.scheme_hint(row["id"], self.ctx.scan_id)
-            ep = await resolver.resolve(session, host, hint=hint)
-            if not ep.ok:
-                res.warn(f"{host}: heç bir protokol əlçatan deyil "
-                         f"({failure_label(ep.kind)})")
-                return
+        hint = db.scheme_hint(row["id"], self.ctx.scan_id)
+        ep = await resolver.resolve(session, host, hint=hint)
+        if not ep.ok:
+            res.warn(f"{host}: heç bir protokol əlçatan deyil "
+                     f"({failure_label(ep.kind)})")
+            return None
 
-            # Seçilmiş protokolun İLK cavabı təkrar istifadə olunur.
-            headers, body = ep.headers, ep.body
-            techs = self._detect(host, headers, body)
-            strategy = techs[0][1] if techs else "generic"
-            if strategy == "generic":
-                code, _, _ = await self._fetch(
-                    session, ep.url("/wp-login.php"))
-                if code == 200:
-                    strategy = "wordpress"
-                    techs.append(("wordpress", "wordpress", 0.5))
+        # Seçilmiş protokolun İLK cavabı təkrar istifadə olunur.
+        headers, body = ep.headers, ep.body
+        techs = self._detect(host, headers, body)
+        strategy = techs[0][1] if techs else "generic"
+        if strategy == "generic":
+            code, _, _ = await self._fetch(
+                session, ep.url("/wp-login.php"))
+            if code == 200:
+                strategy = "wordpress"
+                techs.append(("wordpress", "wordpress", 0.5))
 
-            product, version, conf = await self._version(
-                session, ep, strategy, headers, body)
-            tech_raw = self._tech_raw(row["tech_raw"], techs, product, version)
-            db.upsert_host(host, self.ctx.scan_id, strategy=strategy,
-                           tech_raw=tech_raw[:500])
-            if version:
-                res.data.setdefault("technologies", []).append({
-                    "host": host, "product": product, "version": version,
-                    "confidence": conf})
+        product, version, conf = await self._version(
+            session, ep, strategy, headers, body)
+        tech_raw = self._tech_raw(row["tech_raw"], techs, product, version)
+        db.upsert_host(host, self.ctx.scan_id, strategy=strategy,
+                       tech_raw=tech_raw[:500])
 
-            await self._strategy_checks(session, ep, row, host, strategy, res)
+        await self._strategy_checks(session, ep, row, host, strategy, res)
+        if version:
+            return {"host": host, "product": product, "version": version,
+                    "confidence": conf}
+        return None
 
     # ---------------- HTTP ----------------
     async def _fetch(self, session, url: str):

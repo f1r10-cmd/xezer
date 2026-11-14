@@ -24,8 +24,14 @@ import tempfile
 
 from .. import db
 from ..adapters.base import limited_wordlist, run_process
+from ..parallel import run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
+
+#: Faza 1 (§7): host-lar üzərində paralel ffuf alt-proseslərinin tavanı.
+#: Subprocess-lər `HttpPolicy` semaforundan keçmədiyi üçün KİÇİK saxlanılır —
+#: hər proses öz `--rate` limitini hörmət edir və hər host müstəqildir.
+MAX_PARALLEL = 3
 
 WORDLIST = "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
 
@@ -60,17 +66,28 @@ class ContentEngine:
                 "(əhatə məhdudlaşdırıldı)")
         print(f"[═══ M5 CONTENT (ffuf) ═══] {len(hosts)} host")
 
-        for row in hosts:
+        # Faza 1 (§7): host-lar MÜSTƏQİLDİR (hər biri öz ffuf alt-prosesi ilə) →
+        # MƏHDUD paralel icra. Cooldown/scope yoxlaması hər host üçün edilir;
+        # bir host-un xətası digərlərini dayandırmır.
+        limit = max(1, min(MAX_PARALLEL, len(hosts)))
+
+        async def _one(row):
             host = row["subdomain"]
             if self.guardian and self.guardian.halted(host):
-                res.warn(f"{host} cooldown altındadır — atlandı")
-                continue
+                return f"{host} cooldown altındadır — atlandı"
             try:
                 self.cfg.authorize_target(host)
             except ScopeError as exc:
-                res.warn(f"{host}: {exc}")
-                continue
+                return f"{host}: {exc}"
             await self._ffuf(row, res)
+            return None
+
+        outcomes = await run_bounded(hosts, _one, limit=limit)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"content: gözlənilməz xəta — {outcome}")
+            elif outcome:
+                res.warn(outcome)
         return res
 
     async def _ffuf(self, host_row, res: EngineResult) -> None:

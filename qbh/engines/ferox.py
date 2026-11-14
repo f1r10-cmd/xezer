@@ -15,8 +15,13 @@ import tempfile
 
 from .. import db
 from ..adapters.base import limited_wordlist, run_process
+from ..parallel import run_bounded
 from ..results import EngineResult
 from ..scope import ScopeError
+
+#: Faza 1 (§7): paralel feroxbuster alt-proseslərinin tavanı (ferox ağırdır →
+#: mühafizəkar dəyər). Hər proses öz `--rate-limit`/`-t` limitini hörmət edir.
+MAX_PARALLEL = 2
 
 FEROX_WORDLIST = \
     "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt"
@@ -48,17 +53,28 @@ class FeroxEngine:
             return res.skip("yaşayan host yoxdur — ferox atlandı")
         print(f"[═══ M5+ FEROX (recursive, depth={MAX_DEPTH}) ═══] {len(hosts)} host")
 
-        for row in hosts:
+        # Faza 1 (§7): host-lar MÜSTƏQİLDİR (hər biri öz feroxbuster prosesi ilə)
+        # → MƏHDUD paralel icra. Cooldown/scope yoxlaması hər host üçün edilir;
+        # bir host-un xətası digərlərini dayandırmır.
+        limit = max(1, min(MAX_PARALLEL, len(hosts)))
+
+        async def _one(row):
             host = row["subdomain"]
             if self.guardian and self.guardian.halted(host):
-                res.warn(f"{host} cooldown altındadır — atlandı")
-                continue
+                return f"{host} cooldown altındadır — atlandı"
             try:
                 self.cfg.authorize_target(host)
             except ScopeError as exc:
-                res.warn(f"{host}: {exc}")
-                continue
+                return f"{host}: {exc}"
             await self._scan(row, res)
+            return None
+
+        outcomes = await run_bounded(hosts, _one, limit=limit)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                res.warn(f"ferox: gözlənilməz xəta — {outcome}")
+            elif outcome:
+                res.warn(outcome)
         return res
 
     async def _scan(self, host_row, res: EngineResult) -> None:

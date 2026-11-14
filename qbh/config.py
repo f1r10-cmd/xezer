@@ -78,6 +78,10 @@ class Limits:
     connect_timeout: float = 10.0
     total_timeout: float = 30.0
     cooldown: float = 60.0
+    #: Faza 1 (§5/§8): host başına concurrency tavanı. `None` → təyin olunmayıb
+    #: (köhnə davranış: tək host qlobal tavanı işğal edə bilər). Aşağı salındıqda
+    #: host-lar izolyasiya olunur; HEÇ VAXT qlobal tavanı aşmır, RPS artırmır.
+    per_host_concurrency: int | None = None
 
 
 @dataclass
@@ -361,6 +365,16 @@ class Config:
                     raise ConfigError(
                         f"limits.{key} ən azı {minimum} olmalıdır")
                 setattr(lim, key, value)
+        # Faza 1 (§8): host başına concurrency tavanı — opsional, ciddi yoxlanılır.
+        if "per_host_concurrency" in limits and limits["per_host_concurrency"] is not None:
+            value = limits["per_host_concurrency"]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(
+                    "limits.per_host_concurrency tam ədəd olmalıdır")
+            if value < 1:
+                raise ConfigError(
+                    "limits.per_host_concurrency ən azı 1 olmalıdır")
+            lim.per_host_concurrency = int(value)
         return lim
 
     @staticmethod

@@ -34,6 +34,9 @@ class Context:
     scheduler: Any = None
     #: Faza 5 (§9): sübut-əsaslı adaptiv izləmə nəzarətçisi.
     adaptive: Any = None
+    #: F-01: mərhələ adı → son REAL status (ok|partial|failed|skipped|cancelled).
+    #: `ChainPipeline` davam testlərinin nəticəsini bu FAKTİKİ statusa görə yazır.
+    stage_status: dict = field(default_factory=dict)
     #: Faza 1 (§5): URL Intelligence (lazy tək nüsxə).
     _urlintel: Any = None
     _egress: Any = None

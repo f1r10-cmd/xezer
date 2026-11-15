@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 
-from .. import db
+from .. import db, urlintel
 from ..http_policy import TargetBlocked
 from ..redact import mask_value
 from ..results import EngineResult
@@ -68,13 +68,22 @@ class JSAnalysisEngine:
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
         rows = db.get_db().execute(
-            "SELECT u.url, u.host_id, h.subdomain FROM urls u "
-            "JOIN hosts h ON h.id=u.host_id WHERE u.is_js=1 AND h.scan_id=? "
-            "LIMIT ?",
+            "SELECT u.id, u.url, u.host_id, u.is_js, u.source, h.subdomain "
+            "FROM urls u JOIN hosts h ON h.id=u.host_id "
+            "WHERE u.is_js=1 AND h.scan_id=? LIMIT ?",
             (db.effective_scan_id(self.ctx.scan_id), MAX_JS)).fetchall()
         if not rows:
             return res.skip("JS faylı tapılmadı — JS analizi atlandı")
-        print(f"[═══ M4 JS ANALİZ ═══] {len(rows)} fayl")
+        # F-03: URL Intelligence uyğunluq qaydası ('js' → yalnız JavaScript
+        # resursları). Sətirlər prioritet sırasına salınır, dublikatlar
+        # çıxarılır; uyğun olmayan/naməlum resurslar SƏBƏBLƏ qeyd olunur
+        # (səssizcə atılmır). Orijinal URL və host_id TOXUNULMAZ qalır.
+        rows, plan = urlintel.get_url_intelligence(self.ctx).plan_rows(
+            rows, engine=self.name, limit=MAX_JS)
+        if not rows:
+            return res.skip("uyğun JS resursu qalmadı — JS analizi atlandı")
+        print(f"[═══ M4 JS ANALİZ ═══] {len(rows)} fayl"
+              f" (uyğun={plan.eligible}, xaric={plan.excluded})")
 
         import aiohttp
         async with aiohttp.ClientSession() as session:

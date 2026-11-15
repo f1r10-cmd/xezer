@@ -434,6 +434,83 @@ class TestRunModes:
         assert c.chain is not None
 
 
+# ---------------------------------------------------- _run_parallel (F-02)
+
+
+class TestRunParallelBackpressure:
+    """F-02: `submit()` rəddi SƏSSİZCƏ udulmur — mərhələ AÇIQ qeyd olunur."""
+
+    async def test_rejected_submit_records_failed_stage(self, make_conductor,
+                                                        monkeypatch, capsys):
+        c = make_conductor()
+        c.scan_id = 1
+        from qbh.scheduler import Scheduler, submit_with_backpressure
+
+        async def always_full(self, task):
+            self.rejected += 1
+            return False
+
+        monkeypatch.setattr(Scheduler, "submit", always_full)
+
+        async def quick(sched, task, **kw):
+            return await submit_with_backpressure(sched, task, attempts=2,
+                                                  delay=0.0)
+
+        monkeypatch.setattr(conductor_mod, "submit_with_backpressure", quick)
+
+        async def factory():
+            return EngineResult(stage="x", ok=True)
+
+        await c._run_parallel([("vuln", factory), ("js", factory)])
+        stages = {s.stage: s.status for s in c.stages}
+        assert stages == {"vuln": "failed", "js": "failed"}
+        assert all(any("backpressure" in e for e in s.errors)
+                   for s in c.stages)
+        assert "backpressure" in capsys.readouterr().out
+
+    async def test_all_stages_execute_when_queue_has_space(self, make_conductor):
+        c = make_conductor()
+        c.scan_id = 1
+        ran: list[str] = []
+
+        async def factory():
+            ran.append("x")
+            return EngineResult(stage="x", ok=True)
+
+        await c._run_parallel([("vuln", factory), ("js", factory),
+                               ("content", factory)])
+        assert len(ran) == 3
+        assert all(s.status == "ok" for s in c.stages)
+        assert c.ctx.scheduler.snapshot()["rejected_backpressure"] == 0
+
+    async def test_report_tasks_executed_match_actual(self, make_conductor,
+                                                      monkeypatch):
+        """F-05: hesabatdakı `executed` FAKTİKİ icra ilə üst-üstə düşür."""
+        c = make_conductor()
+        c.scan_id = 1
+        ran: list[str] = []
+
+        async def factory():
+            ran.append("x")
+            return EngineResult(stage="x", ok=True)
+
+        await c._run_parallel([("vuln", factory), ("js", factory),
+                               ("content", factory), ("ferox", factory)])
+        captured = {}
+
+        def fake_generate(**kw):
+            captured.update(kw)
+            return "r"
+
+        monkeypatch.setattr(conductor_mod.generator, "generate", fake_generate)
+        c.generate_report()
+        orch = captured["meta"]["orchestration"]
+        assert orch["tasks"]["executed"] == len(ran) == 4
+        assert orch["tasks_sources"]["executed"] == "scheduler"
+        # Ledger və scheduler mənbələri AYRI görünür.
+        assert orch["tasks_scheduler"]["executed"] == 4
+
+
 # ------------------------------------------------------------ _run_offensive
 
 

@@ -27,7 +27,9 @@ import re
 from dataclasses import dataclass, field
 
 from . import db, urlintel
-from .adaptive import (STRENGTH_STRONG, STRENGTH_WEAK, Signal)
+from .adaptive import (OUTCOME_CANCELLED, OUTCOME_COMPLETED, OUTCOME_FAILED,
+                       OUTCOME_INCONCLUSIVE, OUTCOME_PARTIAL,
+                       STRENGTH_STRONG, STRENGTH_WEAK, FollowUp, Signal)
 from .engines.api_fuzz import APIFuzzEngine
 from .engines.bypass import BypassEngine
 from .engines.confirm import ConfirmEngine
@@ -89,6 +91,37 @@ SIGNAL_STRENGTH = {
     "vuln_js_lib": STRENGTH_STRONG,
 }
 
+#: Delegasiya olunan davam hərəkəti → onu icra edən Conductor mərhələsi.
+#: `None`/yoxdursa hərəkət dəstəklənmir və açıq şəkildə qeyd olunur.
+ACTION_STAGE = {
+    "live_check": "recon",
+    "fingerprint": "fingerprint",
+    "js_analysis": "js",
+    "extract_endpoints": "js",
+    "extract_secrets": "js",
+    "scope_validate": "api_enum",
+    "targeted_fuzz": "ferox",
+    "sqli_suggestive": "sqli",
+    "capture_evidence": "validation",
+    "sqli_probe": "sqli",
+    "xss_probe": "xss",
+    "ssti_probe": "ssti",
+    "ssrf_probe": "ssrf",
+    "jwt_probe": "jwt",
+    "source_harvest": "sourcecode",
+    "library_cve_check": "library_cve",
+}
+
+#: Conductor mərhələ statusu → davam testinin REAL nəticəsi.
+#: "skipped"/"partial" UĞUR kimi təqdim OLUNMUR (detection ≠ validation).
+STAGE_OUTCOME = {
+    "ok": OUTCOME_COMPLETED,
+    "partial": OUTCOME_PARTIAL,
+    "skipped": OUTCOME_INCONCLUSIVE,
+    "failed": OUTCOME_FAILED,
+    "cancelled": OUTCOME_CANCELLED,
+}
+
 #: Fingerprint/səhifə mətnində template engine işarələri → SSTI.
 TEMPLATE_ENGINE_RE = re.compile(
     r"(?i)(jinja2?|twig|freemarker|velocity|handlebars|mustache|thymeleaf|"
@@ -113,6 +146,22 @@ class ChainEvent:
     kind: str
     detail: str
     actions: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PendingFollowUp:
+    """Planlaşdırılmış (hələ nəticəsi yazılmamış) davam testi.
+
+    `identity` — `AdaptiveController.evaluate()` tərəfindən `TaskLedger`-də
+    `queued` vəziyyətinə keçirilmiş tapşırıq kimliyi. İcra/qiymətləndirmə
+    BİTDİKDƏN SONRA bu kimlik terminal vəziyyətə keçir — beləcə heç bir davam
+    tapşırığı `queued` vəziyyətində ƏBƏDİ qalmır.
+    """
+
+    identity: str
+    kind: str
+    detail: str
+    actions: tuple = ()
 
 
 class FindingStore:
@@ -167,6 +216,12 @@ class ChainPipeline:
         self.duplicates = 0            # təkrarlanan hadisə (hadisə səviyyəsi)
         self.suppressed = 0            # təkrar/dövri tetikleme və ya dublikat tapşırıq
         self._noted: set[str] = set()
+        #: F-01: planlaşdırılmış, nəticəsi hələ yazılmamış davam testləri.
+        self._pending: list[PendingFollowUp] = []
+        #: F-01: davam testi audit jurnalı (hər qərar səbəblə görünür).
+        self.followups: list[dict] = []
+        #: F-07: yeni dəlil əsasında `deferred`-dən `eligible`-a keçənlər.
+        self.reconsidered: list[dict] = []
 
     @property
     def enabled(self) -> bool:
@@ -259,7 +314,14 @@ class ChainPipeline:
 
     def _evaluate_signal(self, kind: str, detail: str,
                          allowed: list[str]) -> None:
-        """Siqnalı adaptiv nəzarətçiyə ötürür (davam testi qərarı QEYD olunur)."""
+        """Siqnalı adaptiv nəzarətçiyə ötürür və davam qərarını QORUYUR.
+
+        F-01: `evaluate()` qaytardığı `FollowUp` ARTIK ATILMIR. `proceed=True`
+        olduqda davam testi növbəyə alınır və `run()` sonunda REAL icra
+        nəticəsi ilə terminal vəziyyətə keçirilir. `proceed=False` halında
+        `evaluate()` özü səbəbi (`skipped_duplicate`/`skipped_no_signal`)
+        statistikada qeyd edir — burada heç nə planlaşdırılmır.
+        """
         strength = SIGNAL_STRENGTH.get(kind)
         if strength is None or self.adaptive is None:
             return
@@ -269,9 +331,86 @@ class ChainPipeline:
             endpoint = detail
         identity = task_identity(self.store.scan_id, "chain", endpoint,
                                  test_type=kind)
-        self.adaptive.evaluate(
+        fu: FollowUp = self.adaptive.evaluate(
             Signal(kind=kind, strength=strength, detail=detail),
             identity=identity, actions=tuple(allowed))
+        if not fu.proceed:
+            return
+        # Dublikat qarşısı: eyni kimlik üçün YALNIZ BİR dəfə növbəyə alınır
+        # (`evaluate` artıq `TaskLedger` ilə təkrar-tapşırığı rədd edir, bu isə
+        # ikinci müdafiə qatıdır — eyni siqnal selində belə).
+        if any(p.identity == fu.identity for p in self._pending):
+            return
+        self._pending.append(PendingFollowUp(
+            identity=fu.identity, kind=kind, detail=detail,
+            actions=tuple(fu.actions)))
+
+    # ------------------------------------------------------ davam testi icrası
+    def _stage_status(self, stage: str) -> str | None:
+        """Conductor mərhələsinin REAL statusu (yoxdursa `None`)."""
+        statuses = getattr(self.ctx, "stage_status", None)
+        if not statuses:
+            return None
+        return statuses.get(stage)
+
+    def _followup_outcome(self, actions: tuple) -> tuple[str | None, str]:
+        """Davam hərəkətləri üçün REAL nəticə və səbəb müəyyən edir.
+
+        Qaytarır `(none_ola_bilər, səbəb)`. Heç bir hərəkət dəstəklənmirsə
+        `(None, səbəb)` → çağıran `record_unsupported` istifadə edir.
+        """
+        unsupported: list[str] = []
+        for action in actions:
+            exec_kind = ACTION_EXEC.get(action)
+            if exec_kind == "local":
+                # Lokal hərəkət bu pipeline daxilində REAL icra olunub?
+                if action in self.executed:
+                    return OUTCOME_COMPLETED, f"local:{action}:icra olundu"
+                unsupported.append(f"{action} (lokal icra olunmadı)")
+                continue
+            if exec_kind == "delegated":
+                stage = ACTION_STAGE.get(action)
+                status = self._stage_status(stage) if stage else None
+                if status is None:
+                    unsupported.append(f"{action} (mərhələ icra olunmadı)")
+                    continue
+                outcome = STAGE_OUTCOME.get(status)
+                if outcome is None:
+                    unsupported.append(f"{action} (naməlum status {status})")
+                    continue
+                return outcome, f"delegated:{action}:{stage}:{status}"
+            unsupported.append(f"{action} (dəstəklənmir)")
+        return None, "; ".join(unsupported) or "davam hərəkəti yoxdur"
+
+    async def _dispatch_followups(self) -> None:
+        """Planlaşdırılmış davam testlərini KONTROLLU icra ilə yekunlaşdırır.
+
+        Heç bir davam tapşırığı `queued` vəziyyətində saxlanılmır: hər biri ya
+        REAL icra nəticəsi ilə (`record_outcome`), ya da AÇIQ səbəblə
+        (`record_unsupported`) terminal vəziyyətə keçir. Bu, MÖVCUD kontrollu
+        icra yolundan (Conductor mərhələləri / lokal addımlar) istifadə edir —
+        paralel icra mexanizmi YARADILMIR və əlavə HTTP trafiki yaradılmır.
+        """
+        for pending in list(self._pending):
+            await self._dispatch_one(pending)
+        self._pending.clear()
+
+    async def _dispatch_one(self, pending: PendingFollowUp) -> None:
+        if self.adaptive is None:
+            return
+        outcome, reason = self._followup_outcome(pending.actions)
+        if outcome is None:
+            self.adaptive.record_unsupported(pending.identity, reason)
+        else:
+            self.adaptive.record_outcome(pending.identity, outcome, reason)
+        self.followups.append({
+            "identity": pending.identity,
+            "kind": pending.kind,
+            "detail": pending.detail,
+            "actions": list(pending.actions),
+            "outcome": outcome or "unsupported",
+            "reason": reason,
+        })
 
     def _sync_chain_metrics(self) -> None:
         if self.metrics is None:
@@ -434,6 +573,53 @@ class ChainPipeline:
         self.executed.append("schemathesis_fuzz")
         self._done(ident)
 
+    # ------------------------------------------------------ F-07: yenidən baxış
+    def _discover_param_evidence(self) -> dict:
+        """Parametr kəşfinin verdiyi YENİ dəlili endpoint kimliyinə görə toplayır.
+
+        `param_enum` tapdığı gizli parametrləri `<url>##params:a,b` markeri ilə
+        saxlayır. Bu metod markeri endpoint kimliyinə bağlayır — beləcə əvvəl
+        parametrsiz olduğu üçün `deferred` sayılan endpoint YENİ dəlillə
+        yenidən qiymətləndirilə bilər. Heç bir yeni URL uydurulmur.
+        """
+        conn = db.get_db()
+        sid = db.effective_scan_id(self.store.scan_id)
+        evidence: dict[str, set] = {}
+        rows = conn.execute(
+            "SELECT url FROM urls WHERE url LIKE '%##params:%' AND scan_id=?",
+            (sid,)).fetchall()
+        for r in rows:
+            url = r["url"] or ""
+            base, sep, params = url.partition("##params:")
+            if not sep:
+                continue
+            identity = urlintel.endpoint_identity(base)
+            if not identity:
+                continue
+            evidence.setdefault(identity, set()).update(
+                p.strip() for p in params.split(",") if p.strip())
+        return {k: tuple(sorted(v)) for k, v in evidence.items()}
+
+    def _reconsider_deferred(self) -> None:
+        """F-07: parametr kəşfindən SONRA deferred endpoint-ləri yenidən baxır.
+
+        Dəlil əsaslı və bounded-dır: yalnız dəlili DƏYİŞƏN endpoint-lər
+        yenidən qiymətləndirilir, dəyişməyənlər təkrar emal olunmur və sonsuz
+        dövr qurulmur. Heç bir əlavə HTTP trafiki yaradılmır — bu, sadəcə
+        uyğunluq qərarının yenilənməsidir (icra mövcud yoldan gedir).
+        """
+        evidence = self._discover_param_evidence()
+        if not evidence:
+            return
+        intel = getattr(self.ctx, "_urlintel", None) or urlintel.get_url_intelligence(self.ctx)
+        promoted: list[dict] = []
+        for engine in urlintel.INJECT_ENGINES:
+            promoted += intel.reconsider(engine, evidence)
+        if promoted:
+            self.reconsidered = promoted
+            print(f"   [♻] {len(promoted)} deferred endpoint yeni parametr "
+                  "dəlili ilə yenidən uyğun sayıldı")
+
     async def run(self) -> EngineResult:
         res = EngineResult(stage="chain")
         if not self.enabled:
@@ -489,11 +675,19 @@ class ChainPipeline:
         # Faza 3.4: əvvəllər "delegated" olan addımlar indi REAL icra olunur.
         await self._run_param_steps(res)
         await self._run_openapi_steps(res)
+        # F-07: parametr kəşfinin verdiyi YENİ dəlil ilə deferred endpoint-ləri
+        # yenidən qiymətləndir (dəlil əsaslı, bounded, dublikatsız).
+        self._reconsider_deferred()
 
         for ev in self.events:
             for action in ev.actions:
                 if ACTION_EXEC.get(action) == "delegated":
                     self.delegated.append(action)
+
+        # F-01: davam testlərini REAL nəticə ilə yekunlaşdır (heç biri `queued`
+        # vəziyyətində qalmır). Bu, lokal addımlar BİTDİKDƏN sonra çağırılır ki
+        # `self.executed` faktiki vəziyyəti əks etdirsin.
+        await self._dispatch_followups()
 
         self._sync_chain_metrics()
         res.data = {
@@ -503,6 +697,8 @@ class ChainPipeline:
             "skipped": self.skipped,
             "duplicates": self.duplicates,
             "suppressed": self.suppressed,
+            "followups": self.followups,
+            "reconsidered": self.reconsidered,
         }
         print(f"   [⛓] zəncir: {len(self.events)} trigger · "
               f"icra: {len(set(self.executed))} · "
@@ -520,4 +716,6 @@ class ChainPipeline:
             "skipped": self.skipped,
             "duplicates": self.duplicates,
             "suppressed": self.suppressed,
+            "followups": self.followups,
+            "reconsidered": self.reconsidered,
         }

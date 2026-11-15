@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .tasks import STATE_COMPLETED, STATE_FAILED, STATE_PARTIAL, TaskLedger
+from .tasks import (STATE_CANCELLED, STATE_COMPLETED, STATE_FAILED,
+                    STATE_PARTIAL, STATE_SKIPPED, TaskLedger)
 
 # --------------------------------------------------------------------------- #
 # Siqnal gücü
@@ -28,10 +29,15 @@ STRENGTH_WEAK = "weak"
 STRENGTH_STRONG = "strong"
 
 #: Nəticə sinifləri (detection ≠ validation).
-OUTCOME_VALIDATED = "validated"
-OUTCOME_REJECTED = "rejected"
-OUTCOME_INCONCLUSIVE = "inconclusive"
-OUTCOME_PARTIAL = "partial"
+#: `validated` YALNIZ real validasiya nəticəsində istifadə olunur — siqnal
+#: özü HEÇ VAXT avtomatik "təsdiqlənmiş" sayılmır.
+OUTCOME_VALIDATED = "validated"      # → completed (yalnız real validasiya)
+OUTCOME_COMPLETED = "completed"      # → completed (icra olundu, iddia yox)
+OUTCOME_REJECTED = "rejected"        # → failed (işləndi, nəticəsiz)
+OUTCOME_FAILED = "failed"            # → failed (icra xətası)
+OUTCOME_INCONCLUSIVE = "inconclusive"  # → partial
+OUTCOME_PARTIAL = "partial"          # → partial
+OUTCOME_CANCELLED = "cancelled"      # → cancelled
 
 
 def classify_strength(*, callback: bool = False, marker: bool = False,
@@ -85,10 +91,15 @@ class AdaptiveStats:
     weak: int = 0
     strong: int = 0
     scheduled: int = 0
+    dispatched: int = 0
+    unsupported: int = 0
     skipped_no_signal: int = 0
     skipped_duplicate: int = 0
     validated: int = 0
+    completed: int = 0
     rejected: int = 0
+    failed: int = 0
+    cancelled: int = 0
     inconclusive: int = 0
     partial: int = 0
 
@@ -99,10 +110,15 @@ class AdaptiveStats:
             "weak": self.weak,
             "strong": self.strong,
             "scheduled": self.scheduled,
+            "dispatched": self.dispatched,
+            "unsupported": self.unsupported,
             "skipped_no_signal": self.skipped_no_signal,
             "skipped_duplicate": self.skipped_duplicate,
             "validated": self.validated,
+            "completed": self.completed,
             "rejected": self.rejected,
+            "failed": self.failed,
+            "cancelled": self.cancelled,
             "inconclusive": self.inconclusive,
             "partial": self.partial,
         }
@@ -154,23 +170,46 @@ class AdaptiveController:
 
     def record_outcome(self, identity: str, outcome: str,
                        note: str = "") -> None:
-        """Davam testinin nəticəsini qeyd edir (nəticə İTİRİLMİR)."""
+        """Davam testinin REAL nəticəsini qeyd edir (nəticə İTİRİLMİR).
+
+        Bu metod YALNIZ icra BİTDİKDƏN SONRA çağırılmalıdır — planlaşdırma
+        anında deyil. Beləliklə statistikalar FAKTİKİ icranı əks etdirir.
+        """
         mapping = {
             OUTCOME_VALIDATED: (STATE_COMPLETED, "validated"),
+            OUTCOME_COMPLETED: (STATE_COMPLETED, "completed"),
             OUTCOME_REJECTED: (STATE_FAILED, "rejected"),
+            OUTCOME_FAILED: (STATE_FAILED, "failed"),
             OUTCOME_INCONCLUSIVE: (STATE_PARTIAL, "inconclusive"),
             OUTCOME_PARTIAL: (STATE_PARTIAL, "partial"),
+            OUTCOME_CANCELLED: (STATE_CANCELLED, "cancelled"),
         }
         state, label = mapping.get(outcome, (STATE_PARTIAL, "inconclusive"))
         self.ledger.mark(identity, state, note or label)
+        self.stats.dispatched += 1
         if outcome == OUTCOME_VALIDATED:
             self.stats.validated += 1
+        elif outcome == OUTCOME_COMPLETED:
+            self.stats.completed += 1
         elif outcome == OUTCOME_REJECTED:
             self.stats.rejected += 1
+        elif outcome == OUTCOME_FAILED:
+            self.stats.failed += 1
+        elif outcome == OUTCOME_CANCELLED:
+            self.stats.cancelled += 1
         elif outcome == OUTCOME_PARTIAL:
             self.stats.partial += 1
         else:
             self.stats.inconclusive += 1
+
+    def record_unsupported(self, identity: str, note: str) -> None:
+        """Dəstəklənməyən / dəlegasiya olunan davam hərəkətini AÇIQ qeyd edir.
+
+        Belə tapşırıq `queued` vəziyyətində ƏBƏDİ qalmamalıdır — terminal
+        `skipped` vəziyyətinə keçir və səbəb audit üçün saxlanılır.
+        """
+        self.ledger.mark(identity, STATE_SKIPPED, note)
+        self.stats.unsupported += 1
 
     def _record(self, fu: FollowUp) -> FollowUp:
         self.decisions.append({

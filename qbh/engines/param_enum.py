@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from .. import db
+from .. import db, urlintel
 from ..adapters.base import run_process
 from ..redact import redact
 from ..results import EngineResult
@@ -37,15 +37,27 @@ class ParamEnumEngine:
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
         rows = db.get_db().execute(
-            "SELECT DISTINCT u.url, u.host_id, h.subdomain FROM urls u "
+            "SELECT DISTINCT u.url, u.host_id, u.is_js, u.source, h.subdomain "
+            "FROM urls u "
             "JOIN hosts h ON h.id = u.host_id "
             "WHERE u.is_js = 0 AND u.source IN "
             "('katana','gau','ffuf','ferox','api-enum','kiterunner') "
             "AND u.url NOT LIKE '%##%' AND h.scan_id=? LIMIT ?",
-            (db.effective_scan_id(self.ctx.scan_id), MAX_URLS)).fetchall()
+            (db.effective_scan_id(self.ctx.scan_id),
+             urlintel.fetch_limit(MAX_URLS, MAX_URLS,
+                                  filtering=True))).fetchall()
         if not rows:
             return res.skip("uyğun URL yoxdur — param enum atlandı")
-        print(f"[═══ PARAM ENUM (Arjun + x8) ═══] {len(rows)} URL")
+        # F-03: URL Intelligence uyğunluq qaydası ('param' → parametr kəşfi).
+        # Statik resurslar (css/js/şəkil/font) istisna olunur; parametrsiz
+        # dinamik endpoint UYĞUNDUR (gizli parametr axtarışının hədəfidir).
+        # Sətirlər prioritetlə sıralanır və dublikatlar çıxarılır.
+        rows, plan = urlintel.get_url_intelligence(self.ctx).plan_rows(
+            rows, engine="param", limit=MAX_URLS)
+        if not rows:
+            return res.skip("uyğun URL qalmadı — param enum atlandı")
+        print(f"[═══ PARAM ENUM (Arjun + x8) ═══] {len(rows)} URL"
+              f" (uyğun={plan.eligible}, xaric={plan.excluded})")
 
         for row in rows:
             if not self.cfg.in_scope(row["url"]):

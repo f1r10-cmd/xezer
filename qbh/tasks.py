@@ -14,8 +14,8 @@ Prinsiplər:
     `max_attempts`-dən çox olmayaraq təkrar icazə verilir.
   * Heç bir qərar SƏSSİZCƏ verilmir — hər biri səbəblə qeyd olunur.
   * Defolt olaraq BİR PROSES daxilində (skan) işləyir. Skan tək prosesdə
-    icra olunduğu üçün bu kifayətdir (bax: `qbh/urlintel.py` audit qeydi və
-    final hesabat §14 — DB miqrasiyası TƏLƏB OLUNMUR).
+    icra olunduğu üçün bu kifayətdir (bax: `qbh/urlintel.py` audit qeydi) —
+    davamlı (durable) saxlama tələb olunmur və DB miqrasiyası TƏLƏB EDİLMİR.
 """
 from __future__ import annotations
 

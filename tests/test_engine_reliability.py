@@ -408,6 +408,25 @@ class TestContentReliability:
         assert res.urls == 2
         assert res.findings == 2
 
+    async def test_content_type_feeds_urlintel_refinement(self, tmp_db, make_ctx,
+                                                          monkeypatch, tmp_path):
+        # Faza 2: ffuf-in artıq çəkdiyi cavabın `content-type`-ı URL
+        # Intelligence təsnifatını dəqiqləşdirir (əlavə HTTP sorğusu YOX).
+        payload = json.dumps({"results": [
+            {"url": "https://127.0.0.1/mystery", "status": 200, "length": 900,
+             "content-type": "text/html"},
+        ]})
+        self._prep(tmp_path, monkeypatch, _mk_run(payload))
+        db.upsert_host("127.0.0.1", scan_id=1, status_code=200)
+        ctx = _ctx(make_ctx)
+        res = await ContentEngine(ctx).run()
+        assert res.urls == 1
+        intel = ctx._urlintel
+        ref = intel.refinements["https://127.0.0.1/mystery"]
+        assert ref.applied is True
+        assert ref.to_category == "html"
+        assert "ffuf" in ref.evidence
+
     async def test_valid_partial_json_after_timeout(self, tmp_db, make_ctx,
                                                     monkeypatch, tmp_path):
         self._prep(tmp_path, monkeypatch, _mk_run(_VALID_JSON, timed_out=True))

@@ -18,6 +18,7 @@ Yalnız şəbəkəsiz deterministik hesablama — heç bir xarici hədəf skan o
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import Counter
 
 from qbh import urlintel
@@ -185,7 +186,9 @@ async def run_pipeline(strategy: str, rows) -> dict:
         await sched.submit(SchedTask(
             identity=f"{eng}:{ep.identity}", engine=eng, host=ep.host,
             family=ep.family, priority=urlintel.priority(ep), run=work))
+    t0 = time.perf_counter()
     await sched.run()
+    elapsed = round(time.perf_counter() - t0, 4)
     snap = sched.snapshot()
     chain = plan_chain(strategy, rows)
 
@@ -205,7 +208,17 @@ async def run_pipeline(strategy: str, rows) -> dict:
         "requests": requests["n"],
         "peak_queue": snap["peak_queue"],
         "peak_concurrency": snap["peak_concurrency"],
+        "engine_runs": dict(snap["engine_runs"]),
         "host_runs": snap["host_runs"],
+        # Divar-saatı YALNIZ sintetik harness üçündür (`sleep`-əsaslı iş);
+        # real skan vaxtı kimi TƏQDİM OLUNMUR — yalnız faktiki ölçmə.
+        "elapsed": elapsed,
+        # Sintetik harness HEÇ BİR real aşkarlama və təsdiq etmir → 0/0.
+        # Bu, "aşkarlama siqnalı AVTOMATİK təsdiqə çevrilmir" prinsipini göstərir.
+        "findings": 0,
+        "validated_findings": 0,
+        "skipped_endpoints": sum(int(v) for v in pm["excluded"].values()),
+        "deferred_endpoints": sum(int(v) for v in pm["deferred"].values()),
         "chain": chain,
     }
 
@@ -235,7 +248,13 @@ class TestOrchestrationBenchmark:
             print(_fmt("eligible", r["eligible"]))
             print(_fmt("excluded", r["excluded"]))
             print(_fmt("deferred", r["deferred"]))
+            print(_fmt("engine_runs", r["engine_runs"]))
             print(_fmt("host_runs", r["host_runs"]))
+            print(_fmt("elapsed (synthetic)", r["elapsed"]))
+            print(_fmt("findings/validated",
+                       f"{r['findings']}/{r['validated_findings']}"))
+            print(_fmt("skipped/deferred endpoints",
+                       f"{r['skipped_endpoints']}/{r['deferred_endpoints']}"))
             print(_fmt("chain", r["chain"]))
 
         # --- 1. Artıq (redundant) iş AZALIR ---
@@ -270,6 +289,14 @@ class TestOrchestrationBenchmark:
         # --- 6. Zəncir: təkrar hadisələr davam testini TƏKRAR planlaşdırmır.
         assert new["chain"]["scheduled"] < base["chain"]["scheduled"]
         assert new["chain"]["duplicate"] > 0
+
+        # --- 7. FAKTİKİ icra ölçülür; aşkarlama AVTOMATİK təsdiqə çevrilmir.
+        assert new["elapsed"] > 0.0                       # real divar-saatı
+        assert sum(new["engine_runs"].values()) == new["executed"]
+        assert new["findings"] == 0                       # sintetik: tapıntı yox
+        assert new["validated_findings"] == 0             # avto-təsdiq YOX
+        assert new["skipped_endpoints"] >= 0
+        assert new["deferred_endpoints"] >= 0
 
 
 # ------------------------------------------------------------------ standalone

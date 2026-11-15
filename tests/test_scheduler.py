@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 
-from qbh.scheduler import SchedTask, Scheduler
+from qbh.scheduler import (SchedTask, Scheduler,  # noqa: I001
+                           submit_with_backpressure)
 from qbh.tasks import TaskLedger, STATE_COMPLETED, task_identity
 
 
@@ -272,3 +273,87 @@ class TestLedgerIntegration:
         assert runs == 1
         assert led.stats.deduplicated == 4
         assert s.executed == 1
+
+
+class TestBackpressureHelper:
+    """F-02: `submit_with_backpressure` MƏHDUD gözləmə ilə qəbul zəmanəti verir.
+
+    Növbə doyduqda sonsuz gözləmir; cəhdlər bitərsə `False` qaytarır ki, çağıran
+    mərhələni AÇIQ şəkildə qeyd edə bilsin (səssiz itki olmasın).
+    """
+
+    async def test_submits_when_space_available(self):
+        s = Scheduler(workers=2)
+        done: list[int] = []
+
+        async def work():
+            done.append(1)
+
+        s.start()
+        try:
+            ok = await submit_with_backpressure(
+                s, SchedTask(identity="a", engine="e", host="h", run=work))
+            assert ok is True
+            await s.drain()
+        finally:
+            await s.aclose()
+        assert done == [1]
+        assert s.executed == 1
+
+    async def test_retries_until_queue_drains(self):
+        s = Scheduler(workers=1, queue_limit=1)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking():
+            started.set()
+            await release.wait()
+
+        s.start()
+        try:
+            await s.submit(SchedTask(identity="busy", engine="e", host="h",
+                                     run=blocking))
+            await started.wait()
+            await s.submit(SchedTask(identity="q", engine="e", host="h",
+                                     run=_noop))   # növbə doldu (limit=1)
+
+            async def releaser():
+                await asyncio.sleep(0.05)
+                release.set()
+
+            t = asyncio.create_task(releaser())
+            ok = await submit_with_backpressure(
+                s, SchedTask(identity="c", engine="e", host="h", run=_noop),
+                attempts=200, delay=0.01)
+            await t
+            assert ok is True
+            await s.drain()
+        finally:
+            await s.aclose()
+        assert s.completed == 3
+
+    async def test_returns_false_when_bounded_attempts_exhausted(self):
+        s = Scheduler(workers=1, queue_limit=1)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking():
+            started.set()
+            await release.wait()
+
+        s.start()
+        try:
+            await s.submit(SchedTask(identity="busy", engine="e", host="h",
+                                     run=blocking))
+            await started.wait()
+            await s.submit(SchedTask(identity="q", engine="e", host="h",
+                                     run=_noop))
+            ok = await submit_with_backpressure(
+                s, SchedTask(identity="c", engine="e", host="h", run=_noop),
+                attempts=3, delay=0.01)
+            assert ok is False
+            assert s.rejected >= 1
+            release.set()
+            await s.drain()
+        finally:
+            await s.aclose()

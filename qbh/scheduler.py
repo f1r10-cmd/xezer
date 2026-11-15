@@ -17,6 +17,24 @@ Prinsiplər:
   * Mövcud `HttpPolicy`/`Guardian`/rate limitləri KEÇMİR — bu planlaşdırıcı
     yalnız "nə vaxt hansı işi başlatmaq" qərarını verir; faktiki HTTP trafiki
     yenə `Guardian`/`HttpPolicy`-dən keçir və RPS ARTIRILMIR.
+
+İDEMPOTENTLİK MÜQAVİLƏSİ (F-04 — TƏK həqiqət mənbəyi)
+-----------------------------------------------------
+Planlaşdırıcı özü qəbul (admission) üçün `TaskLedger`-ə MÜRACİƏT ETMİR.
+Yeganə həqiqət mənbəyi **`TaskLedger`-dir** və müqavilə belədir:
+
+  1. ÇAĞIRAN `TaskLedger.consider(identity)` ilə icazə ALMALIDIR.
+     Yalnız `decision.create is True` olduqda tapşırıq `submit()` edilir.
+  2. `Scheduler` yalnız HƏYAT DÖVRÜNÜ (`ledger.mark`) yazır — icra
+     `running → completed|failed|timed_out|cancelled` keçidlərini qeyd edir.
+  3. Planlaşdırıcıya icazəsiz (dəftərdə `queued`/`running`/terminal olan)
+     eyni kimlikli tapşırıq VERİLMƏMƏLİDİR — deduplikasiya tək yerdə,
+     `TaskLedger`-də baş verir. İki paralel həqiqət mənbəyi YARADILMIR.
+
+Ədalət açarları (F-06): URL-səviyyəli tapşırıqlar üçün REAL `(host, ailə)`
+`url_fair_key()` ilə alınır; hostları əhatə edən (qlobal) mərhələ
+tapşırıqları üçün isə sənədləşdirilmiş `HOST_GLOBAL` sentinelindən istifadə
+olunur — uydurma host dəyəri YAZILMIR.
 """
 from __future__ import annotations
 
@@ -29,6 +47,56 @@ from .tasks import (STATE_CANCELLED, STATE_COMPLETED, STATE_FAILED,
                     STATE_QUEUED, STATE_RUNNING, STATE_TIMED_OUT)
 
 DEFAULT_QUEUE_LIMIT = 512
+
+#: Backpressure zamanı gözləmə parametrləri (SONSUZ gözləmə YOXDUR).
+DEFAULT_SUBMIT_ATTEMPTS = 64
+DEFAULT_SUBMIT_DELAY = 0.02
+
+#: Host-üzrə scope-u OLMAYAN (bütün hostları əhatə edən) mərhələ tapşırıqları
+#: üçün SƏNƏDLƏŞDİRİLMİŞ ədalət açarı (F-06). Belə tapşırıqların tək hostu
+#: yoxdur → `host=""` yerinə bu sentinel "qlobal əhatə"ni bildirir; `family`
+#: isə mərhələnin adıdır. Nəticədə hər mərhələ AYRI ədalət səbətinə düşür və
+#: uzun sürən bir mərhələ digərlərini AÇ QOYMASIN (round-robin).
+HOST_GLOBAL = "*"
+
+
+def url_fair_key(url: str, *, host: str = "") -> tuple[str, str]:
+    """URL-səviyyəli tapşırıq üçün REAL ədalət açarı `(host, ailə)` (F-06).
+
+    `host`/`ailə` UYDURULMUR — `urlintel`-in deterministik normalizasiyasından
+    alınır (`endpoint_family`). Beləcə çox-hostlu, çox-ailəli iş yükü üzərində
+    round-robin ədaləti FAKTİKİ metadata ilə işləyir və eyni marşrutun
+    endpoint-ləri bir-birini AÇ QOYMASIN.
+
+    Normalizasiya mümkün olmadıqda host/ailə boş qalır (uydurma dəyər yox).
+    """
+    from . import urlintel
+
+    fam = urlintel.endpoint_family(url)
+    if not host:
+        norm = urlintel.normalize_url(url)
+        if norm:
+            from urllib.parse import urlsplit
+            host = urlsplit(norm).hostname or ""
+    return (host or "", fam or "")
+
+
+async def submit_with_backpressure(sched: "Scheduler", task: SchedTask, *,
+                                   attempts: int = DEFAULT_SUBMIT_ATTEMPTS,
+                                   delay: float = DEFAULT_SUBMIT_DELAY) -> bool:
+    """`submit()` backpressure-ını MƏHDUD gözləmə ilə idarə edir.
+
+    Növbə doyduqda (`submit()` `False`) qısa müddət gözləyib YENİDƏN cəhd edir
+    — bu müddətdə işçilər növbəni boşaldır. `attempts` tükənərsə `False`
+    qaytarır: çağıran bunu AÇIQ şəkildə qeyd etməlidir (mərhələ SƏSSİZCƏ
+    itirilmir). SONSUZ gözləmə/cəhd YOXDUR və bu funksiya HEÇ BİR HTTP sorğusu
+    yaratmır — yalnız növbə axınını idarə edir (RPS artırılmır).
+    """
+    for _ in range(max(1, int(attempts))):
+        if await sched.submit(task):
+            return True
+        await asyncio.sleep(max(0.0, float(delay)))
+    return False
 
 
 @dataclass
@@ -109,7 +177,13 @@ class Scheduler:
         self.completed = 0
         self.failed = 0
         self.cancelled = 0
-        self.rejected = 0            # backpressure ilə rədd edilən
+        #: Backpressure səbəbilə RƏDD OLUNMUŞ submit CƏHDLƏRİ (cəhdlər).
+        #: `submit_with_backpressure` məhdud təkrar cəhd etdiyi üçün bir
+        #: tapşırıq bir neçə dəfə burada sayıla bilər — bu, tapşırıq İTKİSİ
+        #: DEYİL. `accepted` (submitted) ilə birlikdə submit SƏRHƏDİNİN
+        #: nəticəsini ölçür (niyyət/icra qarışmır; tapşırığın YEKUN taleyi
+        #: TaskLedger vəziyyətində saxlanılır).
+        self.rejected = 0
         self.peak_queue = 0
         self.peak_concurrency = 0
         self.engine_runs: dict[str, int] = {}

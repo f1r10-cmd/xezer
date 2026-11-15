@@ -22,7 +22,7 @@ import json
 import os
 import tempfile
 
-from .. import db
+from .. import db, urlintel
 from ..adapters.base import limited_wordlist, run_process
 from ..parallel import run_bounded
 from ..results import EngineResult
@@ -188,6 +188,13 @@ class ContentEngine:
                 res.warn(f"scope xaricində URL rədd edildi: {url}")
                 continue
             db.insert_url(host_row["id"], url, "ffuf", False, scan_id=self.ctx.scan_id)
+            # Faza 2: ffuf-in ARTİQ çəkdiyi cavabın `content-type`-ı ilə
+            # təsnifatı dəqiqləşdir (əlavə HTTP sorğusu YOX). Yalnız uyğunluğu
+            # dəyişməyən dəqiqləşdirmə tətbiq olunur; əks halda rədd + səbəb.
+            ctype = r.get("content-type")
+            if ctype:
+                urlintel.get_url_intelligence(self.ctx).refine_from_response(
+                    url, content_type=str(ctype), source="ffuf")
             res.urls += 1
             shown += 1
             if r.get("status") == 200 and (r.get("length") or 0) > 500:

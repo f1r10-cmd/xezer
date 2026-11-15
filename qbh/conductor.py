@@ -54,11 +54,128 @@ from .installer import check_tools, format_report, install_tools
 from .metrics import OrchestrationMetrics, ScanMetrics
 from .report import generator
 from .results import EngineResult, StageResult, now_iso
-from .scheduler import SchedTask, Scheduler
+from .scheduler import (HOST_GLOBAL, SchedTask, Scheduler,
+                        submit_with_backpressure)
 from .scope import ScopeError
-from .tasks import EventLedger, TaskLedger, task_identity
+from .tasks import (EventLedger, STATE_FAILED, TaskLedger, task_identity)
 
 _log = logging.getLogger("qbh.conductor")
+
+
+# --------------------------------------------------------------------------- #
+# F-04: MƏRHƏLƏ ASILILIQ XƏRİTƏSİ (tam pipeline)
+# --------------------------------------------------------------------------- #
+#: Hər mərhələ üçün asılılıq/xüsusiyyətlər:
+#:   prereq     — əvvəlcə bitməli mərhələlər (sıra zəmanəti)
+#:   input      — oxunan data
+#:   output     — yazılan data
+#:   scope      — "host" (host-üzrə) | "url" (URL-üzrə) | "global"
+#:   subprocess — xarici alət (binary) işlədir?
+#:   network    — şəbəkə sorğusu göndərir?
+#:   findings   — əvvəlki tapıntılardan asılıdır?
+#:   klass      — 1 müstəqil + paralelləşdirilə bilən |
+#:                2 YALNIZ məhdud qrup daxilində paralel |
+#:                3 ciddi ardıcıl | 4 şərti/davam mərhələsi
+#:
+#: Bu xəritə kodla EYNİ mənbədən törəyir (`run_recon`/`run_vuln` sırası) və
+#: `test_stage_map.py` onun ardıcıllığını yoxlayır. Məqsəd: hansı işin paralel,
+#: hansının ardıcıl olduğunu ƏSASSLI seçmək — hər şeyi bir planlaşdırıcıya
+#: yığmamaq (bax: F-04 tələbi).
+STAGE_MAP: dict[str, dict] = {
+    # --- recon (hər hədəf üzrə budaqlanma) ---
+    "deep_enum": {"prereq": (), "input": "target", "output": "subdomains",
+                  "scope": "host", "subprocess": True, "network": True,
+                  "findings": False, "klass": 3},
+    "recon": {"prereq": ("deep_enum",), "input": "subdomains",
+              "output": "hosts+urls", "scope": "host", "subprocess": True,
+              "network": True, "findings": False, "klass": 3},
+    "bbot": {"prereq": ("recon",), "input": "target", "output": "urls",
+             "scope": "host", "subprocess": True, "network": True,
+             "findings": False, "klass": 3},
+    "waymore": {"prereq": ("recon",), "input": "target", "output": "urls",
+                "scope": "host", "subprocess": True, "network": True,
+                "findings": False, "klass": 3},
+    "dnstwist": {"prereq": ("recon",), "input": "target", "output": "domains",
+                 "scope": "host", "subprocess": True, "network": True,
+                 "findings": False, "klass": 1},
+    "gowitness": {"prereq": ("recon",), "input": "alive hosts",
+                  "output": "screenshots", "scope": "global",
+                  "subprocess": True, "network": True, "findings": False,
+                  "klass": 3},
+    # --- vuln aşkarlama ---
+    "fingerprint": {"prereq": ("recon",), "input": "alive hosts",
+                    "output": "tech/title", "scope": "global",
+                    "subprocess": False, "network": True, "findings": False,
+                    "klass": 3},
+    "wafdetect": {"prereq": ("fingerprint",), "input": "alive hosts",
+                  "output": "waf signature", "scope": "global",
+                  "subprocess": False, "network": True, "findings": False,
+                  "klass": 3},
+    "takeover": {"prereq": ("recon",), "input": "subdomains",
+                 "output": "takeover findings", "scope": "global",
+                 "subprocess": False, "network": True, "findings": False,
+                 "klass": 3},
+    "vuln": {"prereq": ("fingerprint",), "input": "alive hosts",
+             "output": "nuclei findings", "scope": "global",
+             "subprocess": True, "network": True, "findings": False,
+             "klass": 2},
+    "js": {"prereq": ("recon",), "input": "JS urls", "output": "endpoints+secrets",
+           "scope": "url", "subprocess": False, "network": True,
+           "findings": False, "klass": 2},
+    "content": {"prereq": ("recon",), "input": "alive hosts",
+                "output": "paths", "scope": "host", "subprocess": True,
+                "network": True, "findings": False, "klass": 2},
+    "ferox": {"prereq": ("recon",), "input": "alive hosts", "output": "paths",
+              "scope": "host", "subprocess": True, "network": True,
+              "findings": False, "klass": 2},
+    "api_enum": {"prereq": ("js", "content", "ferox"), "input": "alive hosts",
+                 "output": "api routes", "scope": "host", "subprocess": True,
+                 "network": True, "findings": False, "klass": 3},
+    # --- offensive (URL-üzrə, RoE + Guardian qapılı) ---
+    "sqli": {"prereq": ("api_enum",), "input": "param urls", "output": "sqli findings",
+             "scope": "url", "subprocess": False, "network": True,
+             "findings": False, "klass": 2},
+    "xss": {"prereq": ("api_enum",), "input": "param urls", "output": "xss findings",
+            "scope": "url", "subprocess": False, "network": True,
+            "findings": False, "klass": 2},
+    "ssti": {"prereq": ("api_enum",), "input": "param urls",
+             "output": "ssti findings", "scope": "url", "subprocess": False,
+             "network": True, "findings": False, "klass": 2},
+    "ssrf": {"prereq": ("api_enum",), "input": "param urls",
+             "output": "ssrf findings", "scope": "url", "subprocess": False,
+             "network": True, "findings": False, "klass": 2},
+    "jwt": {"prereq": ("js",), "input": "discovered tokens",
+            "output": "jwt findings", "scope": "url", "subprocess": False,
+            "network": True, "findings": True, "klass": 2},
+    "sourcecode": {"prereq": ("recon",), "input": ".git urls",
+                   "output": "source findings", "scope": "url",
+                   "subprocess": False, "network": True, "findings": True,
+                   "klass": 2},
+    # --- post-processing ---
+    "race": {"prereq": ("api_enum",), "input": "endpoint urls",
+             "output": "race findings", "scope": "url", "subprocess": False,
+             "network": True, "findings": False, "klass": 3},
+    "cve_intel": {"prereq": ("fingerprint",), "input": "tech",
+                  "output": "cve matches", "scope": "global",
+                  "subprocess": False, "network": True, "findings": False,
+                  "klass": 1},
+    "library_cve": {"prereq": ("js",), "input": "JS libs",
+                    "output": "lib cve", "scope": "url", "subprocess": False,
+                    "network": True, "findings": False, "klass": 1},
+    "validation": {"prereq": ("sqli", "xss", "ssti", "ssrf", "vuln"),
+                   "input": "candidate findings", "output": "validated findings",
+                   "scope": "global", "subprocess": False, "network": True,
+                   "findings": True, "klass": 4},
+    "chain": {"prereq": ("validation",), "input": "bütün DB vəziyyəti",
+              "output": "zəncir davam testləri", "scope": "global",
+              "subprocess": False, "network": True, "findings": True,
+              "klass": 4},
+}
+
+
+def stage_klass(stage: str) -> int:
+    """Mərhələnin paralellik sinfi (xəritədə yoxdursa 3 — ardıcıl)."""
+    return int(STAGE_MAP.get(stage, {}).get("klass", 3))
 
 
 class PipelineAbort(RuntimeError):
@@ -119,6 +236,10 @@ class Conductor:
         # metrikaları bütün mühərriklər tərəfindən `ctx` vasitəsilə paylaşılır.
         self.orchestration = OrchestrationMetrics()
         self.task_ledger = TaskLedger(max_attempts=3)
+        #: F-05: skan boyu FAKTİKİ planlaşdırıcı icra saylarının toplanması
+        #: (hər `Scheduler` nüsxəsinin snapshot-ı burada birləşir). Beləliklə
+        #: hesabatdakı tapşırıq metrikaları niyyəti deyil, REAL icranı göstərir.
+        self._sched_totals: dict = {}
         self.event_ledger = EventLedger(
             max_depth=int(getattr(cfg.chain, "max_depth", 3) or 3))
         self.adaptive = AdaptiveController(ledger=self.task_ledger,
@@ -241,6 +362,12 @@ class Conductor:
 
     def _record(self, sr: StageResult) -> None:
         self.stages.append(sr)
+        # F-01: mərhələnin REAL statusu `ctx`-ə yazılır — `ChainPipeline` davam
+        # testlərinin nəticəsini uydurmadan, FAKTİKİ mərhələ statusuna görə yazır.
+        try:
+            self.ctx.stage_status[sr.stage] = sr.status
+        except Exception:  # noqa: BLE001 - ctx sadə obyekt olsa da davam et
+            pass
         try:
             db.record_stage(self.scan_id, sr.target, sr.stage, sr.status,
                             sr.duration, "; ".join(sr.errors),
@@ -256,6 +383,11 @@ class Conductor:
         məhdudlaşdırır; bir mərhələnin xətası digərlərinə YAYILMIR və `aclose()`
         bütün işçiləri ləğv edib faktiki bitməsini gözləyir (Task sızması yox).
         Nəticələr `_run_stage` daxilində qeyd olunur (sıra = tamamlanma sırası).
+
+        F-02: `submit()` növbə doyduqda `False` qaytarır. Bu nəticə SƏSSİZCƏ
+        atılmır — `submit_with_backpressure` MƏHDUD (sonsuz olmayan) gözləmə ilə
+        yenidən cəhd edir; yenə alınmasa mərhələ AÇIQ `failed` kimi qeyd olunur
+        (səbəb: backpressure). Beləliklə heç bir mərhələ itmir.
         """
         lim = self.cfg.limits
         per_host = getattr(lim, "per_host_concurrency", None) or 0
@@ -269,12 +401,79 @@ class Conductor:
         self.ctx.scheduler = sched
         async with sched:
             for stage, factory in specs:
-                identity = task_identity(self.scan_id, stage, stage,
-                                         test_type="stage")
-                await sched.submit(SchedTask(
-                    identity=identity, engine=stage, host="",
-                    run=lambda st=stage, f=factory: self._run_stage(st, "", f)))
+                await self._submit_stage(sched, stage, factory)
             await sched.drain()
+        # F-05: bu planlaşdırıcının FAKTİKİ icra saylarını skan toplusuna birləş.
+        self._merge_scheduler_totals(sched.snapshot())
+
+    async def _submit_stage(self, sched, stage: str, factory) -> None:
+        """Mərhələni TƏK həqiqət mənbəyi (TaskLedger) vasitəsilə təqdim edir (F-04).
+
+        İdempotentlik müqaviləsi: qərarı İSTİFADƏÇİ (bu metod) `consider()` ilə
+        alır; `Scheduler` yalnız lifecycle yazır (`mark`). Yeni kimlik deyilsə
+        mərhələ səssizcə ATILMIR — AÇIQ `skipped` kimi qeyd olunur (səbəblə).
+        `submit()` rədd edərsə məhdud cəhd edilir; yenə alınmasa AÇIQ `failed`.
+        """
+        identity = task_identity(self.scan_id, stage, stage, test_type="stage")
+        decision = self.task_ledger.consider(
+            identity, engine=stage, endpoint=stage, test_type="stage")
+        if not decision.create:
+            self._record_dedup(stage, decision.reason)
+            return
+        # F-06: host-üzrə scope-u OLMAYAN mərhələlər üçün SƏNƏDLƏŞDİRİLMİŞ
+        # ədalət açarı — real host UYDURULMUR, `family=stage` ayrı vedrə verir.
+        task = SchedTask(
+            identity=identity, engine=stage, host=HOST_GLOBAL, family=stage,
+            run=lambda st=stage, f=factory: self._run_stage(st, "", f))
+        accepted = await submit_with_backpressure(sched, task)
+        if not accepted:
+            self.task_ledger.mark(identity, STATE_FAILED,
+                                  "scheduler backpressure: qəbul olunmadı")
+            self._record_rejected(stage)
+
+    def _record_dedup(self, stage: str, reason: str) -> None:
+        """İdempotentlik səbəbilə təqdim edilməyən mərhələni AÇIQ qeyd edir (F-04).
+
+        Mərhələ HEÇ VAXT səssizcə itmir: strukturlaşdırılmış `skipped` nəticə və
+        səbəb yazılır ki, hesabatda və metrikalarda görünsün.
+        """
+        sr = StageResult(stage=stage, target="", status="skipped",
+                         started_at=now_iso(), completed_at=now_iso())
+        sr.warnings.append(f"idempotentlik: {reason}")
+        self._record(sr)
+        print(f"\n[▶] {stage}\n   [·] {stage} — idempotentlik: {reason}")
+
+    def _merge_scheduler_totals(self, snap: dict) -> None:
+        """Bütün planlaşdırıcı nüsxələrinin REAL icra saylarını toplayır (F-05).
+
+        Attributiv saylar (executed/completed/rejected…) cəmlənir; pik dəyərlər
+        maksimum götürülür. Bu toplu hesabatda tapşırıq metrikalarının FAKTİKİ
+        icra mənbəyi olur (ledger isə niyyəti göstərir).
+        """
+        for key in ("submitted", "executed", "completed", "failed",
+                    "cancelled", "rejected_backpressure"):
+            self._sched_totals[key] = (self._sched_totals.get(key, 0)
+                                       + int(snap.get(key, 0)))
+        for key in ("peak_queue", "peak_concurrency"):
+            self._sched_totals[key] = max(self._sched_totals.get(key, 0),
+                                          int(snap.get(key, 0)))
+        self._sched_totals["workers"] = snap.get("workers", 0)
+        self._sched_totals["queue_limit"] = snap.get("queue_limit", 0)
+
+    def _record_rejected(self, stage: str) -> None:
+        """Scheduler qəbul etmədiyi mərhələni AÇIQ `failed` kimi qeyd edir (F-02).
+
+        `submit_with_backpressure` məhdud cəhdlərdən sonra da növbəyə qoya
+        bilmirsə, mərhələ səssizcə İTİRİLMƏMƏLİDİR: strukturlaşdırılmış `failed`
+        nəticə və səbəb yazılır ki, hesabatda və metrikalarda görünsün.
+        """
+        sr = StageResult(stage=stage, target="", status="failed",
+                         started_at=now_iso(), completed_at=now_iso())
+        sr.errors.append(
+            "scheduler backpressure: növbə doydu, mərhələ qəbul olunmadı")
+        self._record(sr)
+        print(f"\n[▶] {stage}\n   [✗] {stage} — scheduler backpressure: "
+              "növbə doydu, mərhələ qəbul olunmadı")
 
     # ---------------- mərhələ boru xətləri ----------------
     async def run_recon(self) -> None:
@@ -378,7 +577,9 @@ class Conductor:
             from . import urlintel
 
             urlintel.record_intake(self.ctx)
-            self.orchestration.record_task_stats(self.task_ledger.snapshot())
+            self.orchestration.record_task_stats(
+                self.task_ledger.snapshot(),
+                dict(self._sched_totals) or None)
             self.orchestration.record_chain_stats(self.event_ledger.snapshot())
         except Exception:  # noqa: BLE001 - metrikalar hesabatı bloklamamalıdır
             pass
@@ -486,8 +687,15 @@ class Conductor:
                     # Bütün mərhələlər "ok" olsa da bəziləri NATAMAMDIR —
                     # skanı tam uğurlu kimi təqdim etmək olmaz.
                     status = "partial"
-            self.generate_report()
+            # Faza 4 (dürüstlük): son STATUS hesabatdan ƏVVƏL yazılır ki,
+            # hesabat REAL nəticəni (completed/partial/failed/cancelled)
+            # göstərsin — DB default-u olan `running`-i saxlayıb skanı
+            # tamamlanmış kimi təqdim ETMƏSİN. Çökmə (SIGKILL/power-off)
+            # zamanı bu blok HEÇ VAXT işləmir → sətir `running` qalır və bu,
+            # KƏSİLMİŞ (interrupted) skanın dürüst göstəricisidir; belə skan
+            # üçün hesabat yazılmır.
             db.finish_scan(self.scan_id, status)
+            self.generate_report()
             self.print_summary()
 
     async def run_full(self) -> None:

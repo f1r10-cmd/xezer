@@ -199,9 +199,33 @@ class ScanMetrics:
 # Orkestrasiya metrikaları (Faza 6) — URL / tapşırıq / zəncir / mühərrik
 # --------------------------------------------------------------------------- #
 #: Tapşırıq metrikalarının sabit açar dəsti (boş dəyərlər də göstərilir).
-TASK_KEYS = ("considered", "queued", "deduplicated", "executed", "completed",
-             "partial", "failed", "timed_out", "cancelled", "retried",
-             "skipped", "pending")
+#:
+#: F-05: NIYYƏT (planlama) və FAKTİKİ İCRA AYRI anlayışlardır. Hər açarın
+#: VAHİD mənası var və heç bir açar iki mənbədən cəmlənmir (ikiqat sayma yox):
+#:   discovered    — URL Intelligence-ın kəşf etdiyi UNIKAL URL-lər (mənbə: URL).
+#:   considered    — `TaskLedger.consider()` çağırışları (niyyət).
+#:   eligible      — uyğun (`eligible`) mühərrik-URL cütlərinin cəmi (mənbə: uyğunluq).
+#:   queued        — dəftərdə YENİ yaradılıb növbəyə alınan tapşırıqlar (niyyət).
+#:   accepted      — planlaşdırıcıya QƏBUL olunan (submit=TRUE) tapşırıqlar (icra).
+#:   deduplicated  — idempotentlik üzrə TƏKRAR rədd edilənlər (niyyət).
+#:   rejected      — planlaşdırıcı backpressure ilə rədd edilənlər (icra).
+#:   started       — icraya BAŞLANAN (ledger `running`) tapşırıqlar.
+#:   executed      — FAKTİKİ icra olunan tapşırıqlar (planlaşdırıcı işçisi çalışdı).
+#:   completed     — uğurla tamamlanan (icra realm-i).
+#:   partial       — qismən tamamlanan.
+#:   failed        — uğursuz.
+#:   timed_out     — vaxt aşımı.
+#:   cancelled     — ləğv edilən.
+#:   skipped       — şüurlu atlanan (dəstəklənməyən/qadağan).
+#:   retried       — bounded təkrar cəhdə icazə verilənlər.
+#:   deferred      — təxirə salınan (mənbə: uyğunluq).
+#:   pending       — hələ bitməyən (queued+running).
+TASK_KEYS = (
+    "discovered", "considered", "eligible", "queued", "accepted",
+    "deduplicated", "rejected", "started", "executed", "completed",
+    "partial", "failed", "timed_out", "cancelled", "skipped", "retried",
+    "deferred", "pending",
+)
 
 #: Zəncir metrikalarının sabit açar dəsti.
 CHAIN_KEYS = ("emitted", "received", "duplicate", "conditions_rejected",
@@ -228,9 +252,24 @@ class OrchestrationMetrics:
         self.excluded: Counter = Counter()
         self.deferred: Counter = Counter()
         self.exclusion_reasons: Counter = Counter()
+        #: F-07: təxirə salınmış endpoint-lərin yenidən baxışı — YENİ dəlil
+        #: əsasında uyğun hala keçənlər və hələ də deferred qalanlar.
+        self.reconsidered: Counter = Counter()
+        self.remained_deferred: Counter = Counter()
+        #: Faza 2: cavab metadata-sı əsaslı təsnifat dəqiqləşdirmələri —
+        #: tətbiq olunan və uyğunluğu dəyişəcəyi üçün RƏDD edilənlər.
+        self.refined_applied = 0
+        self.refined_refused = 0
 
         # --- tapşırıq ---
         self.tasks: Counter = Counter({k: 0 for k in TASK_KEYS})
+        #: F-05: xam mənbələr AYRI saxlanılır — niyyət (ledger) vs FAKTİKİ
+        #: icra (scheduler). Beləliklə iki vəziyyət həmişə ayırd edilə bilər.
+        self.tasks_ledger: dict = {}
+        self.tasks_scheduler: dict = {}
+        #: Hər açarın mənbəyi: "ledger" | "scheduler" | "urls" | "eligibility" |
+        #: "unavailable" (uydurma YOX — əlçatmaz metrika açıq işarələnir).
+        self.tasks_sources: dict = {k: "unavailable" for k in TASK_KEYS}
         self.peak_queue = 0
         self.peak_concurrency = 0
         self.backpressure_events = 0
@@ -260,6 +299,28 @@ class OrchestrationMetrics:
         for d in plan.excluded_details:
             self.exclusion_reasons[d.reason] += 1
 
+    def record_reconsider(self, engine: str, *, promoted: int = 0,
+                          remained: int = 0) -> None:
+        """F-07: deferred endpoint yenidən baxışının nəticəsini qeyd edir.
+
+        `promoted` — yeni dəlil sayəsində `deferred`-dən `eligible`-a keçənlər;
+        `remained` — hələ də deferred qalanlar. Heç bir uydurma yoxdur.
+        """
+        self.reconsidered[engine] += int(promoted)
+        self.remained_deferred[engine] += int(remained)
+
+    def record_refinement(self, *, applied: bool) -> None:
+        """Faza 2: cavab metadata-sı ilə təsnifat dəqiqləşdirməsini qeyd edir.
+
+        `applied=True` — uyğunluğu dəyişməyən dəqiqləşdirmə tətbiq olundu.
+        `applied=False` — mühərrik uyğunluğunu dəyişəcəyi üçün RƏDD olundu
+        (evasion/əhatə genişlənməsinin qarşısı). Uydurma say yoxdur.
+        """
+        if applied:
+            self.refined_applied += 1
+        else:
+            self.refined_refused += 1
+
     # -------------------------------------------------------------- queue
     def record_queue_depth(self, depth: int) -> None:
         if depth > self.peak_queue:
@@ -273,12 +334,70 @@ class OrchestrationMetrics:
         self.backpressure_events += 1
 
     # -------------------------------------------------------------- tasks/chain
-    def record_task_stats(self, stats: dict) -> None:
-        for key in TASK_KEYS:
-            if key in stats:
-                self.tasks[key] = int(stats[key])
-        if "executed" not in stats and "started" in stats:
-            self.tasks["executed"] = int(stats["started"])
+    def record_task_stats(self, ledger: dict | None = None,
+                          scheduler: dict | None = None) -> None:
+        """Tapşırıq metrikalarını İKİ AYRI mənbədən sinxronlaşdırır (F-05).
+
+        * `ledger` — `TaskLedger.snapshot()`: NIYYƏT/planlama (nəyi nəzərdən
+          keçirdik, nə qədərini növbəyə aldıq, nə qədərini dedup etdik).
+        * `scheduler` — `Scheduler.snapshot()` (və ya toplanmış saylar): FAKTİKİ
+          İCRA (nə qədəri həqiqətən işçi tərəfindən çalışdı).
+
+        Prinsiplər:
+          * `executed` YALNIZ faktiki icradan (scheduler) götürülür — adaptive
+            niyyətlər və ya sadəcə `consider()` çağırışları onu ŞİŞİRTMİR.
+          * Ledger və scheduler sayları AYRI saxlanılır (`tasks_ledger`,
+            `tasks_scheduler`) → iki vəziyyət həmişə ayırd edilir.
+          * Scheduler məlumatı yoxdursa, faktiki-icra metrikləri UYDURULMUR —
+            `0` yazılır və mənbə `unavailable` kimi işarələnir.
+          * Heç bir açar iki mənbədən CƏMLƏNMİR (ikiqat sayma yoxdur).
+        """
+        led = dict(ledger or {})
+        sch = dict(scheduler or {})
+        self.tasks_ledger = led
+        self.tasks_scheduler = sch
+        t = self.tasks
+        src = self.tasks_sources
+
+        def put(key: str, value, source: str) -> None:
+            t[key] = int(value)
+            src[key] = source
+
+        # --- URL / uyğunluq səviyyəli (eyni kollektor, toplama yox) ---
+        put("discovered", self.urls_unique, "urls")
+        put("eligible", sum(int(v) for v in self.eligible.values()),
+            "eligibility")
+        put("deferred", sum(int(v) for v in self.deferred.values()),
+            "eligibility")
+
+        # --- NIYYƏT / planlama (ledger) ---
+        put("considered", led.get("considered", 0), "ledger")
+        put("queued", led.get("queued", 0), "ledger")
+        put("deduplicated", led.get("deduplicated", 0), "ledger")
+        put("retried", led.get("retried", 0), "ledger")
+        put("skipped", led.get("skipped", 0), "ledger")
+        put("pending", led.get("pending", 0), "ledger")
+        # `started` — ledger-səviyyəli "running"-ə keçid (icraya BAŞLAMA).
+        put("started", led.get("started", led.get("executed", 0)), "ledger")
+        put("partial", led.get("partial", 0), "ledger")
+        put("timed_out", led.get("timed_out", 0), "ledger")
+
+        # --- FAKTİKİ İCRA (scheduler) ---
+        if sch:
+            put("accepted", sch.get("submitted", 0), "scheduler")
+            put("executed", sch.get("executed", 0), "scheduler")
+            put("rejected", sch.get("rejected_backpressure", 0), "scheduler")
+            put("completed", sch.get("completed", 0), "scheduler")
+            put("failed", sch.get("failed", 0), "scheduler")
+            put("cancelled", sch.get("cancelled", 0), "scheduler")
+        else:
+            # Scheduler məlumatı YOXDUR: faktiki-icra metrikası UYDURULMUR.
+            for key in ("accepted", "executed", "rejected"):
+                put(key, 0, "unavailable")
+            # Terminal saylar yalnız ledger-dən (icra realm-i DEYİL).
+            put("completed", led.get("completed", 0), "ledger")
+            put("failed", led.get("failed", 0), "ledger")
+            put("cancelled", led.get("cancelled", 0), "ledger")
 
     def record_chain_stats(self, stats: dict) -> None:
         for key in CHAIN_KEYS:
@@ -315,7 +434,21 @@ class OrchestrationMetrics:
                 "deferred": dict(sorted(self.deferred.items())),
                 "exclusion_reasons": dict(sorted(self.exclusion_reasons.items())),
             },
+            # F-07: deferred → eligible keçidləri (yeni dəlil əsaslı).
+            "reconsideration": {
+                "promoted": dict(sorted(self.reconsidered.items())),
+                "remained_deferred": dict(sorted(self.remained_deferred.items())),
+            },
+            # Faza 2: cavab metadata-sı ilə təsnifat dəqiqləşdirmələri.
+            "response_refinement": {
+                "applied": self.refined_applied,
+                "refused": self.refined_refused,
+            },
             "tasks": dict(sorted(self.tasks.items())),
+            # F-05: mənbələr AYRI — niyyət (ledger) vs faktiki icra (scheduler).
+            "tasks_ledger": dict(sorted(self.tasks_ledger.items())),
+            "tasks_scheduler": dict(sorted(self.tasks_scheduler.items())),
+            "tasks_sources": dict(sorted(self.tasks_sources.items())),
             "queue": {
                 "peak_queue": self.peak_queue,
                 "peak_concurrency": self.peak_concurrency,

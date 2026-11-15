@@ -18,12 +18,31 @@ Prinsiplər:
   * Yeni zəiflik modulu YOXDUR — yalnız mövcud mühərriklər üçün uyğunluq.
 
 Bu modul şəbəkəyə ÇIXMIR və tapıntı yaratmır — yalnız qərar verir.
+
+Cavab metadata-sı ilə təsnifatın dəqiqləşdirilməsi (Faza 2):
+  * `classify_url(..., content_type=...)` real cavab `Content-Type`-ını qəbul edə
+    bilir. Lakin bu, mühərrik uyğunluğunu AVTOMATİK dəyişməməlidir: `Content-Type`
+    hədəf (hücumçu) tərəfindən idarə olunur — ona əsaslanıb endpoint-i "statik"
+    kimi işarələmək injeksiya testini SUSTURMAQ (evasion) deməkdir. Bu, mövcud
+    təhlükəsizlik testini zəiflədir → QADAĞANDIR.
+  * Buna görə cavab metadata-sı YALNIZ uyğunluğu DƏYİŞMƏYƏN təsnifat dəqiqləş-
+    dirməsi üçün istifadə olunur (`UrlIntelligence.refine_from_response`).
+    Dəqiqləşdirmə:
+      1. orijinal URL-i SAXLAYIR (yalnız `category` dəqiqləşir);
+      2. yeni dəlili (content-type + mənbə) qeyd edir;
+      3. BİRTƏRƏFLİDİR — bir endpoint üçün İLK dəlil qalib gəlir, sonrakı
+         fərqli cavab metadata-sı tətbiq OLUNMUR (salınım/oscillation yoxdur);
+      4. HEÇ BİR mühərrikin `eligible/ineligible/deferred` qərarını DƏYİŞMİR —
+         yəni mühərrik-uyğunluğunu kənardan keçmir (bypass etmir).
+    Uyğunluğu dəyişəcək dəqiqləşdirmələr SƏBƏBLƏ RƏDD olunur və qeyd olunur.
+  * Cavab metadata-sı əlavə HTTP sorğusu YARATmir — artıq çəkilmiş cavabdan
+    (məs. `ffuf` JSON çıxışındakı `content-type`) götürülür.
 """
 from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 # --------------------------------------------------------------------------- #
@@ -469,7 +488,10 @@ class Decision:
     evidence: str = ""
 
 
-INJECT_ENGINES = ("sqli", "xss", "ssti", "ssrf", "param")
+#: Dinamik injeksiya testi aparan mühərriklər. `param` BURADA DEYİL: o,
+#: injeksiya testi deyil, parametr KƏŞFİ mühərrikidir (aşağıdakı `param`
+#: qaydasına bax).
+INJECT_ENGINES = ("sqli", "xss", "ssti", "ssrf")
 
 
 def _static_blocked(ep: Endpoint) -> bool:
@@ -478,6 +500,20 @@ def _static_blocked(ep: Endpoint) -> bool:
 
 def evaluate(ep: Endpoint, engine: str) -> Decision:
     """Tək endpoint üçün mühərrik uyğunluğu (AÇIQLANAN səbəblə)."""
+    if engine == "param":
+        # Parametr KƏŞFİ (param_enum): statik resurslar mənasızdır, lakin
+        # parametrsiz dinamik endpoint MƏHZ hədəfdir (gizli parametr axtarışı
+        # belə endpoint-lər üzərində aparılır) → burada `deferred` etmək
+        # kəşfi boğardı. Ona görə yalnız statik resurslar istisna olunur.
+        if _static_blocked(ep):
+            return Decision(
+                engine, False, "ineligible",
+                f"SKIPPED: statik resurs ({ep.category}) — "
+                "parametr kəşfi üçün mənasız", ep.original)
+        return Decision(
+            engine, True, "eligible",
+            "ELIGIBLE: parametr kəşfi üçün uyğun endpoint", ep.original)
+
     if engine in INJECT_ENGINES:
         if _static_blocked(ep):
             return Decision(
@@ -637,12 +673,66 @@ class UrlIntake:
         }
 
 
+@dataclass
+class DeferredEntry:
+    """Təxirə salınmış endpoint qeydi (F-07).
+
+    `signature` — təxirə salınma anındakı DƏLİL imzası (adətən parametr
+    adları). Yenidən qiymətləndirmə YALNIZ dəlil dəyişdikdə baş verir →
+    dəyişməyən dəlil təkrar emal olunmur (sonsuz dövr qarşısı).
+    `rechecks` — bu yazı üçün aparılmış yenidən-qiymətləndirmə sayı (bounded).
+    """
+
+    engine: str
+    identity: str
+    original: str
+    reason: str
+    signature: tuple = ()
+    rechecks: int = 0
+
+
+def evidence_signature(ep: Endpoint) -> tuple:
+    """Endpoint üçün dəlil imzası — parametr adları (deterministik, sıralı)."""
+    return tuple(sorted(ep.param_names))
+
+
+@dataclass(frozen=True)
+class Refinement:
+    """Cavab metadata-sı əsaslı təsnifat dəqiqləşdirməsinin qeydi (Faza 2).
+
+    `applied=True` — dəqiqləşdirmə TƏTBİQ olundu (uyğunluq dəyişməz).
+    `applied=False` — RƏDD olundu (mühərrik uyğunluğunu dəyişəcəkdi) və səbəb
+    `reason`-da saxlanılır. Hər iki halda orijinal URL və dəlil qorunur.
+    Bir endpoint üçün YALNIZ İLK qeyd saxlanılır → salınım (oscillation) yoxdur.
+    """
+
+    identity: str
+    original: str
+    from_category: str
+    to_category: str
+    applied: bool
+    reason: str
+    evidence: str = ""
+
+
 class UrlIntelligence:
     """URL Intelligence orkestratoru — mühərriklər və Conductor bunu paylaşır."""
 
     def __init__(self, metrics=None):
         self.metrics = metrics
         self.last_plan: UrlPlan | None = None
+        #: F-07: təxirə salınmış (`deferred`) endpoint-lərin reyestri.
+        #: Açar: `(engine, endpoint_identity)`. Naməlum endpoint SƏSSİZCƏ
+        #: atılmır — kimliyi və səbəbi ilə burada saxlanılır ki, YENİ dəlil
+        #: yarandıqda yenidən qiymətləndirilə bilsin.
+        self.deferred_registry: dict[tuple[str, str], DeferredEntry] = {}
+        #: Faza 2: cavab metadata-sı əsaslı təsnifat dəqiqləşdirmələri.
+        #: Açar: TAM normalizə olunmuş URL (sorğu parametrləri DAXİL) — dəlil
+        #: müşahidə olunduğu DƏQİQ URL-ə bağlanır, başqa URL-ə ekstrapolyasiya
+        #: olunmur. Yalnız İLK dəlil saxlanılır (birtərəfli → salınım yoxdur).
+        self.refinements: dict[str, Refinement] = {}
+        #: Tətbiq/rədd sayları (uydurma yox — faktiki qərarlar).
+        self.refinement_stats: Counter = Counter({"applied": 0, "refused": 0})
 
     # ------------------------------------------------------------------ intake
     def intake(self, rows) -> UrlIntake:
@@ -669,7 +759,7 @@ class UrlIntelligence:
         Qaytarır: `(seçilmiş_sətirlər, UrlPlan)`. Sətir obyektləri OLDUĞU
         KİMİ qaytarılır — mövcud mühərrik kontraktı dəyişmir.
         """
-        pairs = [(analyze_row(r), r) for r in rows]
+        pairs = [(self.apply_refinement(analyze_row(r)), r) for r in rows]
         seen: set[str] = set()
         unique: list = []
         dup_count = 0
@@ -707,6 +797,7 @@ class UrlIntelligence:
             else:
                 plan.deferred += 1
                 plan.deferred_details.append(d)
+                self._note_deferred(d, ep)
 
         if limit is not None:
             kept = kept[:limit]
@@ -714,6 +805,175 @@ class UrlIntelligence:
         if self.metrics is not None and engine is not None:
             self.metrics.record_plan(plan)
         return kept, plan
+
+    # --------------------------------------------------- F-07: yenidən baxış
+    def _note_deferred(self, d: Decision, ep: Endpoint) -> None:
+        """Təxirə salınmış qərarı reyestrə yazır (kimlik + səbəb + dəlil)."""
+        identity = ep.identity or ep.original
+        key = (d.engine, identity)
+        if key in self.deferred_registry:
+            return                      # ilk qeyd saxlanılır (səbəb sabitdir)
+        self.deferred_registry[key] = DeferredEntry(
+            engine=d.engine, identity=identity, original=ep.original,
+            reason=d.reason, signature=evidence_signature(ep))
+
+    def reconsider(self, engine: str, evidence_map: dict | None = None,
+                   *, max_rounds: int = 1) -> list[dict]:
+        """YENİ dəlil əsasında təxirə salınmış endpoint-ləri yenidən qiymətləndirir.
+
+        `evidence_map`: `{endpoint_identity: cari_dəlil_imzası}` (məsələn
+        parametr kəşfinin tapdığı YENİ parametr adları). Yalnız imzası
+        DƏYİŞƏN və yenidən-yoxlama büdcəsi (`max_rounds`) qalan yazılar
+        baxılır → dəyişməyən dəlil TƏKRAR emal olunmur və sonsuz dövr qurulmur.
+
+        Uyğun hala keçənlər reyestrdən ÇIXARILIR (təkrar yüksəliş yoxdur) və
+        səbəblə birlikdə qaytarılır. Qalan hər yazı üçün də yeni dəlil
+        imzası saxlanılır (növbəti dəfə yalnız YENİ dəyişiklik tetikleyəcək).
+        """
+        evidence_map = dict(evidence_map or {})
+        promoted: list[dict] = []
+        remained = 0
+        for key, entry in list(self.deferred_registry.items()):
+            if entry.engine != engine:
+                continue
+            new_sig = evidence_map.get(entry.identity)
+            if new_sig is None:
+                continue                # bu endpoint üçün yeni dəlil yoxdur
+            new_sig = tuple(sorted(new_sig))
+            if new_sig == entry.signature:
+                continue                # dəlil dəyişməyib → təkrar YOX
+            if entry.rechecks >= max_rounds:
+                continue                # bounded: sonsuz dövr qarşısı
+            entry.rechecks += 1
+            entry.signature = new_sig
+            ep = self._with_evidence(entry.original, new_sig)
+            decision = evaluate(ep, engine)
+            if decision.eligible is True:
+                promoted.append({
+                    "engine": engine, "identity": entry.identity,
+                    "reason": decision.reason,
+                    "from": entry.reason, "evidence": list(new_sig),
+                })
+                del self.deferred_registry[key]
+            else:
+                remained += 1
+                entry.reason = decision.reason
+        if promoted or remained:
+            self._record_reconsider(engine, len(promoted), remained)
+        return promoted
+
+    @staticmethod
+    def _with_evidence(original: str, param_names: tuple) -> Endpoint:
+        """Orijinal URL-i SAXLAYARAQ yeni parametr dəlili ilə endpoint qurur."""
+        ep = analyze(original)
+        params = tuple(
+            Param(name=str(n), value="", category=classify_param(str(n), ""))
+            for n in param_names)
+        ep.params = params
+        return ep
+
+    def _record_reconsider(self, engine: str, promoted: int,
+                           remained: int) -> None:
+        rec = getattr(self.metrics, "record_reconsider", None)
+        if callable(rec):
+            rec(engine, promoted=promoted, remained=remained)
+
+    # ------------------------------- Faza 2: cavab metadata-sı ilə dəqiqləşdirmə
+    @staticmethod
+    def _eligibility_diff(base: Endpoint, candidate: Endpoint) -> list[str]:
+        """`candidate` bir mühərrikin uyğunluq qərarını dəyişirsə onları qaytarır.
+
+        Çıxarış BOŞ olarsa — dəyişdirmə uyğunluğa toxunmur (təhlükəsiz).
+        """
+        changed = []
+        for engine in ENGINES:
+            if evaluate(base, engine).eligible != evaluate(candidate, engine).eligible:
+                changed.append(engine)
+        return changed
+
+    def apply_refinement(self, ep: Endpoint) -> Endpoint:
+        """Qeyd olunmuş dəqiqləşdirməni endpoint-ə TƏTBİQ edirsə tətbiq edir.
+
+        Yalnız DƏQİQ (normalizə olunmuş) URL üzrə uyğunluğu DƏYİŞMƏYƏN
+        dəqiqləşdirmə tətbiq olunur — bu, ikinci qoruma qatıdır.
+        Orijinal URL və digər sahələr TOXUNULMAZ qalır (yalnız `category`).
+        """
+        key = ep.normalized or ep.original
+        ref = self.refinements.get(key)
+        if ref is None or not ref.applied or ref.to_category == ep.category:
+            return ep
+        candidate = replace(ep, category=ref.to_category)
+        if self._eligibility_diff(ep, candidate):
+            return ep                     # təhlükəsizlik: uyğunluq dəyişir → tətbiq yox
+        return candidate
+
+    def refine_from_response(self, url: str, *, content_type: str | None = None,
+                             source: str = "",
+                             params: tuple[Param, ...] | None = None
+                             ) -> Refinement | None:
+        """Cavab metadata-sı (Content-Type) ilə təsnifatı DƏQİQLƏŞDİRİR.
+
+        Nəzarət qaydaları (bax: modul başlığı):
+          * orijinal URL saxlanılır (yalnız `category` dəqiqləşir);
+          * yeni dəlil (content-type + mənbə) qeyd olunur;
+          * BİRTƏRƏFLİ — endpoint üçün ilk dəlil qalib gəlir, təkrarlar no-op;
+          * mühərrik uyğunluğunu DƏYİŞMƏZ → uyğunluq kənardan keçilmir.
+        Uyğunluğu dəyişəcək dəqiqləşdirmələr RƏDD olunur (səbəblə qeyd olunur).
+
+        Tətbiq olunan/rədd edilən qeydi qaytarır; dəyişiklik yoxdursa `None`.
+        """
+        if not content_type:
+            return None
+        base = analyze(url)
+        key = base.normalized or base.original
+        if not key:
+            return None
+        existing = self.refinements.get(key)
+        if existing is not None:
+            return existing               # birtərəfli: ilk dəlil qalib gəlir
+        if params is None:
+            params = base.params
+        observed = classify_url(url, content_type=content_type, params=params)
+        if observed == base.category:
+            return None                   # dəyişiklik yox → qeyd lazım deyil
+        evidence = f"content-type={content_type.strip()}"
+        if source:
+            evidence = f"{evidence} (mənbə: {source})"
+        changed = self._eligibility_diff(base, replace(base, category=observed))
+        if changed:
+            ref = Refinement(
+                identity=base.identity, original=base.original,
+                from_category=base.category, to_category=observed,
+                applied=False, evidence=evidence,
+                reason=("REFUSED: cavab metadata-sı mühərrik uyğunluğunu "
+                        f"dəyişərdi ({', '.join(changed)}) — evasion/əhatə "
+                        "genişlənməsinin qarşısı alındı"))
+            self.refinement_stats["refused"] += 1
+        else:
+            ref = Refinement(
+                identity=base.identity, original=base.original,
+                from_category=base.category, to_category=observed,
+                applied=True, evidence=evidence,
+                reason=(f"APPLIED: {base.category} → {observed} "
+                        "(uyğunluq dəyişməz)"))
+            self.refinement_stats["applied"] += 1
+        self.refinements[key] = ref
+        self._record_refinement(applied=ref.applied)
+        return ref
+
+    def refinements_summary(self) -> dict:
+        """Dəqiqləşdirmə qərarlarının izlənə bilən xülasəsi (deterministik)."""
+        entries = [asdict(r) for r in self.refinements.values()]
+        return {
+            "applied": self.refinement_stats["applied"],
+            "refused": self.refinement_stats["refused"],
+            "entries": entries,
+        }
+
+    def _record_refinement(self, *, applied: bool) -> None:
+        rec = getattr(self.metrics, "record_refinement", None)
+        if callable(rec):
+            rec(applied=applied)
 
 
 def get_url_intelligence(ctx) -> UrlIntelligence:

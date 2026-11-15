@@ -20,7 +20,7 @@ import re
 
 import aiohttp
 
-from .. import db
+from .. import db, urlintel
 from ..http_policy import TargetBlocked
 from ..redact import redact
 from ..results import EngineResult
@@ -85,12 +85,19 @@ class LibraryCVEEngine:
     async def run(self) -> EngineResult:
         res = EngineResult(stage=self.name)
         rows = db.get_db().execute(
-            "SELECT u.url, u.host_id, h.subdomain FROM urls u "
-            "JOIN hosts h ON h.id=u.host_id WHERE u.is_js=1 AND h.scan_id=? "
-            "LIMIT ?", (db.effective_scan_id(self.ctx.scan_id), MAX_JS)
-        ).fetchall()
+            "SELECT u.id, u.url, u.host_id, u.is_js, u.source, h.subdomain "
+            "FROM urls u JOIN hosts h ON h.id=u.host_id "
+            "WHERE u.is_js=1 AND h.scan_id=? LIMIT ?",
+            (db.effective_scan_id(self.ctx.scan_id), MAX_JS)).fetchall()
         if not rows:
             return res.skip("JS faylı yoxdur — library CVE atlandı")
+        # F-03: URL Intelligence uyğunluq qaydası ('library_cve' → JavaScript
+        # resursları və kitabxana dəlili). Sətirlər prioritetlə sıralanır,
+        # dublikatlar çıxarılır; qalan qərarlar səbəblə qeyd olunur.
+        rows, plan = urlintel.get_url_intelligence(self.ctx).plan_rows(
+            rows, engine=self.name, limit=MAX_JS)
+        if not rows:
+            return res.skip("uyğun JS resursu qalmadı — library CVE atlandı")
 
         # 1) kitabxanaları topla
         libs: dict[tuple[int, str], dict[str, str]] = {}
@@ -108,7 +115,8 @@ class LibraryCVEEngine:
             if not libs:
                 return res.skip("kitabxana versiyası aşkarlanmadı")
 
-            print(f"[═══ LIBRARY CVE (OSV/KEV/EPSS) ═══] {len(libs)} host")
+            print(f"[═══ LIBRARY CVE (OSV/KEV/EPSS) ═══] {len(libs)} host"
+                  f" (uyğun={plan.eligible}, xaric={plan.excluded})")
             kev = await get_kev(session)
             for (host_id, sub), found in libs.items():
                 for package, version in found.items():

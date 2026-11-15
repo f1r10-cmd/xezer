@@ -16,10 +16,13 @@ Prinsiplər:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .tasks import (STATE_CANCELLED, STATE_COMPLETED, STATE_FAILED,
                     STATE_PARTIAL, STATE_SKIPPED, TaskLedger)
+
+_log = logging.getLogger("qbh.adaptive")
 
 # --------------------------------------------------------------------------- #
 # Siqnal gücü
@@ -128,12 +131,17 @@ class AdaptiveController:
     """Siqnal → şərti davam testi qərarlarını verən idarəçi."""
 
     def __init__(self, *, ledger: TaskLedger | None = None,
-                 max_attempts: int = 3, metrics=None):
+                 max_attempts: int = 3, metrics=None, store=None):
         self.ledger = ledger if ledger is not None else TaskLedger(
             max_attempts=max_attempts)
         self.metrics = metrics
         self.stats = AdaptiveStats()
         self.decisions: list[dict] = []
+        #: Opsional davamlı saxlama adapteri (`recovery.DurableStore`, Faza 2
+        #: §4.2). `None` → yalnız RAM (əvvəlki davranış). Verildikdə hər
+        #: planlaşdırılmış davam testi `followup_queue`-ə yazılır və nəticə
+        #: terminal statusla yenilənir.
+        self.store = store
 
     # ------------------------------------------------------------------ decide
     def evaluate(self, signal: Signal, *, identity: str,
@@ -166,6 +174,7 @@ class AdaptiveController:
         # siqnalın təkrar emissiyası YALANÇI "bounded retry" kimi yenidən
         # planlaşdırılardı. Nəticə `record_outcome` ilə yazılır.
         self.stats.scheduled += 1
+        self._persist_followup(identity, actions, status="pending")
         return self._record(FollowUp(True, reason, tuple(actions), identity))
 
     def record_outcome(self, identity: str, outcome: str,
@@ -187,6 +196,11 @@ class AdaptiveController:
         state, label = mapping.get(outcome, (STATE_PARTIAL, "inconclusive"))
         self.ledger.mark(identity, state, note or label)
         self.stats.dispatched += 1
+        # Davamlı növbədə davam testi REAL icradan sonra terminal status alır
+        # (Faza 2 §4.2): "executed" (icra olundu) və ya "failed" (xəta/rədd).
+        fu_status = "failed" if state in (STATE_FAILED, STATE_CANCELLED) \
+            else "executed"
+        self._persist_followup(identity, (), status=fu_status)
         if outcome == OUTCOME_VALIDATED:
             self.stats.validated += 1
         elif outcome == OUTCOME_COMPLETED:
@@ -210,6 +224,53 @@ class AdaptiveController:
         """
         self.ledger.mark(identity, STATE_SKIPPED, note)
         self.stats.unsupported += 1
+        self._persist_followup(identity, (), status="skipped")
+
+    # ------------------------------------------------------ davamlılıq (Faza 2)
+    def _persist_followup(self, identity: str, actions, *, status: str) -> None:
+        """Davam testini davamlı növbəyə yazır/yeniləyir (store yoxsa no-op).
+
+        `status="pending"` → yeni gözləyən sətir; digər statuslar → mövcud
+        gözləyən sətri terminal statusla yeniləyir (yalnız REAL nəticədən
+        sonra — planlaşdırma anında deyil).
+        """
+        if self.store is None or not identity:
+            return
+        try:
+            if status == "pending":
+                self.store.persist_followup(
+                    identity, ";".join(a for a in (actions or ())) or identity,
+                    status="pending")
+            else:
+                self.store.mark_followup(identity, status)
+        except Exception as exc:      # pragma: no cover - DB əlçatmazdır
+            _log.warning("davam testi davamlı saxlanmadı (%s): %s",
+                         identity, exc)
+
+    def restore_followups(self, records) -> int:
+        """Davamlı növbədən GÖZLƏYƏN davam testlərini auditə bərpa edir.
+
+        `records` — `followup_queue` sətirləri (mapping/`sqlite3.Row`).
+        Qaytarır: bərpa olunmuş davam testi sayı.
+        """
+        restored = 0
+        for rec in records or ():
+            try:
+                identity = rec["prerequisite_hash"] or ""
+                action = rec["proposed_action"] or ""
+            except (TypeError, IndexError, KeyError):
+                continue
+            if not identity or any(d.get("identity") == identity
+                                   for d in self.decisions):
+                continue
+            self.decisions.append({
+                "identity": identity, "proceed": True,
+                "reason": "bərpa: gözləyən davam testi",
+                "actions": [action] if action else [],
+            })
+            self.stats.scheduled += 1
+            restored += 1
+        return restored
 
     def _record(self, fu: FollowUp) -> FollowUp:
         self.decisions.append({

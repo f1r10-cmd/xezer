@@ -39,6 +39,7 @@ olunur — uydurma host dəyəri YAZILMIR.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -79,6 +80,81 @@ def url_fair_key(url: str, *, host: str = "") -> tuple[str, str]:
             from urllib.parse import urlsplit
             host = urlsplit(norm).hostname or ""
     return (host or "", fam or "")
+
+
+# --------------------------------------------------------------------------- #
+# Host-üzrə DİNAMİK concurrency (Faza 1, §3.4)
+# --------------------------------------------------------------------------- #
+class HostLimit:
+    """Host-üzrə DİNAMİK məhdudiyyətli async giriş qapısı.
+
+    Sabit `asyncio.Semaphore`-dan fərqli olaraq `limit` dəyişə bilir:
+      * 429 (rate-limit) → limit AZALIR (`throttle`) — host-ü təzyiq altında
+        buraxmırıq;
+      * ardıcıl SAĞLAM cavab → limit BƏRPA olur (`recover`, tavan = `ceiling`).
+
+    ƏSAS: bu qapı yalnız "neçə tapşırıq EYNİ ANDA başlaya bilər" qərarını
+    verir. HTTP gözləmə/Retry-After HÖRMƏTİ `HttpPolicy`/`Guardian`-dadır — bu
+    qapı onu DƏYİŞMİR və heç bir HTTP sorğusu yaratmır (RPS artırılmır).
+    """
+
+    def __init__(self, limit: int):
+        self.ceiling = max(1, int(limit))
+        self.limit = self.ceiling
+        self._active = 0
+        self._cond: asyncio.Condition | None = None
+
+    def _ensure(self) -> None:
+        if self._cond is None:
+            self._cond = asyncio.Condition()
+
+    async def acquire(self) -> None:
+        self._ensure()
+        assert self._cond is not None
+        async with self._cond:
+            await self._cond.wait_for(lambda: self._active < self.limit)
+            self._active += 1
+
+    async def release(self) -> None:
+        if self._cond is None:
+            return
+        async with self._cond:
+            if self._active > 0:
+                self._active -= 1
+            self._cond.notify_all()
+
+    def set_limit(self, limit: int) -> int:
+        """Limiti tavan daxilində təyin edir (>=1). Yeni limiti qaytarır."""
+        self.limit = max(1, min(self.ceiling, int(limit)))
+        self._wake()
+        return self.limit
+
+    def throttle(self) -> int:
+        """429 → limit azaldılır (yarıya, minimum 1)."""
+        return self.set_limit(self.limit // 2 if self.limit > 1 else 1)
+
+    def recover(self) -> int:
+        """Sağlam cavab → limit bir addım bərpa olunur (tavanla məhdud)."""
+        return self.set_limit(self.limit + 1)
+
+    def _wake(self) -> None:
+        # Limit ARTDIRILANDA gözləyənlər oyadılmalıdır. `set_limit` sinxron
+        # çağırıla bilər → yalnız işləyən loop varsa planlaşdırırıq.
+        if self._cond is None:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._notify())
+        except RuntimeError:
+            pass
+
+    async def _notify(self) -> None:
+        assert self._cond is not None
+        async with self._cond:
+            self._cond.notify_all()
+
+    @property
+    def active(self) -> int:
+        return self._active
 
 
 async def submit_with_backpressure(sched: "Scheduler", task: SchedTask, *,
@@ -138,7 +214,11 @@ class _Slot:
 
     async def __aexit__(self, exc_type, exc, tb):
         for sem in reversed(self._held):
-            sem.release()
+            released = sem.release()
+            # `asyncio.Semaphore.release()` sinxrondur; `HostLimit.release()`
+            # isə `async`-dır (gözləyənləri oyatmaq üçün) → hər ikisini dəstəklə.
+            if hasattr(released, "__await__"):
+                await released
         self._held.clear()
         self.sched._exit_slot(self.task)
         return False
@@ -149,7 +229,8 @@ class Scheduler:
 
     def __init__(self, *, workers: int = 4, queue_limit: int | None = None,
                  global_limit: int = 0, per_host_limit: int = 0,
-                 engine_limits: dict | None = None, ledger=None, metrics=None):
+                 engine_limits: dict | None = None, ledger=None, metrics=None,
+                 guardian=None):
         self.workers = max(1, int(workers))
         self.queue_limit = (DEFAULT_QUEUE_LIMIT if queue_limit is None
                             else int(queue_limit))
@@ -159,11 +240,16 @@ class Scheduler:
                               for k, v in (engine_limits or {}).items()}
         self.ledger = ledger
         self.metrics = metrics
+        #: Guardian verildikdə onun MÖVCUD cooldown məlumatı REUSE olunur
+        #: (Guardian artıq blok hadisələrini izləyir → təkrarlanmır).
+        self.guardian = guardian
 
         self._buckets: dict[int, OrderedDict] = {}
         self._cond: asyncio.Condition | None = None
         self._global_sem: asyncio.Semaphore | None = None
-        self._host_sems: dict[str, asyncio.Semaphore] = {}
+        #: Host-üzrə DİNAMİK limit qapıları (§3.4) — sabit semafor əvəzinə.
+        self._host_limits: dict[str, HostLimit] = {}
+        self._host_cooldown: dict[str, float] = {}
         self._engine_sems: dict[str, asyncio.Semaphore] = {}
         self._workers: list[asyncio.Task] = []
         self._stopping = False
@@ -188,6 +274,9 @@ class Scheduler:
         self.peak_concurrency = 0
         self.engine_runs: dict[str, int] = {}
         self.host_runs: dict[str, int] = {}
+        #: Adaptiv concurrency sayğacları (§3.4).
+        self.host_throttles = 0
+        self.host_recoveries = 0
 
     # ------------------------------------------------------------------ setup
     def _ensure(self) -> None:
@@ -201,13 +290,66 @@ class Scheduler:
         if self._global_sem is not None:
             sems.append(self._global_sem)
         if self.per_host_limit:
-            sems.append(self._host_sems.setdefault(
-                task.host or "", asyncio.Semaphore(self.per_host_limit)))
+            sems.append(self._host_limits.setdefault(
+                task.host or "", HostLimit(self.per_host_limit)))
         limit = self.engine_limits.get(task.engine)
         if limit:
             sems.append(self._engine_sems.setdefault(
                 task.engine, asyncio.Semaphore(limit)))
         return sems
+
+    # ------------------------------------------------------ adaptiv idarəetmə
+    def host_limit(self, host: str) -> int:
+        """Host-un CARİ icazəli paralelliyi (Guardian cooldown-u reuse olunur)."""
+        key = host or ""
+        limit = self._host_limits.get(key)
+        if limit is None:
+            return self.per_host_limit
+        if self.guardian is not None and self.guardian.halted(key):
+            return 1
+        return limit.limit
+
+    def observe(self, host: str, status, *,
+                retry_after: float | None = None) -> int:
+        """HTTP cavabına görə host paralelliyini DİNAMİK tənzimləyir (§3.4).
+
+          * 429 → limit azaldılır (yarıya, min 1); `Retry-After` verilərsə
+            cooldown qeyd olunur — sonra bərpa YALNIZ cooldown bitəndən sonra.
+          * 2xx/3xx → limit bir addım bərpa olunur (tavanla məhdud).
+
+        DİQQƏT: `Retry-After` HÖRMƏTİ (gözləmə) `HttpPolicy`-dədir — bu metod
+        heç vaxt gözləmir, yalnız paralellik tavanını dəyişir (HTTP trafik
+        yoxdur; RPS artırılmır). Guardian verildikdə onun cooldown məlumatı
+        TƏKRAR saxlanmır, birbaşa oxunur.
+        """
+        key = host or ""
+        limit = self._host_limits.get(key)
+        if limit is None:
+            return 0
+        try:
+            code = int(status)
+        except (TypeError, ValueError):
+            code = 0
+        if self.guardian is not None and self.guardian.halted(key):
+            limit.set_limit(1)
+            return 1
+        if code == 429:
+            new = limit.throttle()
+            if retry_after and float(retry_after) > 0:
+                self._host_cooldown[key] = max(
+                    self._host_cooldown.get(key, 0.0),
+                    time.monotonic() + float(retry_after))
+            self.host_throttles += 1
+            return new
+        if 200 <= code < 400:
+            if time.monotonic() < self._host_cooldown.get(key, 0.0):
+                return limit.limit       # cooldown bitməmiş → bərpa YOX
+            before = limit.limit
+            new = limit.recover()
+            if new > before:
+                self.host_recoveries += 1
+            return new
+        return limit.limit
 
     def _enter_slot(self, task: SchedTask) -> None:
         self._active += 1
@@ -408,4 +550,8 @@ class Scheduler:
             "queue_limit": self.queue_limit,
             "host_runs": dict(sorted(self.host_runs.items())),
             "engine_runs": dict(sorted(self.engine_runs.items())),
+            "host_limits": {k: v.limit
+                            for k, v in sorted(self._host_limits.items())},
+            "host_throttles": self.host_throttles,
+            "host_recoveries": self.host_recoveries,
         }

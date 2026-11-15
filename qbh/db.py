@@ -11,12 +11,30 @@ Xüsusiyyətlər:
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 
-DB_PATH = "findings.db"
-SCHEMA_VERSION = 6
+#: Baza yolu. `QBH_DB_PATH` mühit dəyişəni ilə əvəz oluna bilər (məs. crash
+#: bərpa testləri üçün alt-proses ayrı bazada işləyir).
+DB_PATH = os.environ.get("QBH_DB_PATH", "findings.db")
+
+#: Sxem versiyası.
+#:  * v6 → secret vault (`secrets.value_enc`).
+#:  * v7 (Faza 2, §4) → davamlı icra/bərpa cədvəlləri: `task_state`,
+#:    `event_state`, `followup_queue`. Əlavə (additive) — mövcud data qorunur.
+SCHEMA_VERSION = 7
+
+#: Davamlı tapşırıq vəziyyətləri (`task_state.status`) — `tasks.LIFECYCLE` ilə
+#: eyni dəstdir. `db` `tasks`-dan asılı olmasın deyə burada KİMLİK şəkildə
+#: saxlanılır (yeganə həqiqət mənbəyi `tasks.py`-dir; bu yalnız SQL səviyyəsi).
+TASK_STATES = ("queued", "running", "completed", "partial", "failed",
+               "timed_out", "cancelled", "skipped")
+
+#: `followup_queue.status` dəyərləri.
+FOLLOWUP_STATUSES = ("pending", "executed", "skipped", "failed")
 
 #: Miqrasiya olunmuş (v3 və əvvəlki) sətirlərə verilən "legacy" scan id-si.
 #: Bu dəyər HEÇ VAXT aktiv skanın hədəfi ola bilməz — `alive_hosts(scan_id)`
@@ -153,6 +171,37 @@ CREATE TABLE IF NOT EXISTS validated (
   finding_id INTEGER PRIMARY KEY,
   passed INTEGER, note TEXT, checked_at TEXT
 );
+-- Faza 2 (§4.2): davamlı icra və bərpa. Bu cədvəllər ƏLAVƏDİR — in-memory
+-- dəftərləri ƏVƏZ ETMİR, yalnız çökmədən sonra bərpa üçün yazılır.
+CREATE TABLE IF NOT EXISTS task_state (
+  task_id TEXT PRIMARY KEY,
+  scan_id INTEGER NOT NULL,
+  identity_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  engine TEXT NOT NULL DEFAULT '',
+  endpoint TEXT, method TEXT, params TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  last_error TEXT, result_data TEXT,
+  FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+CREATE TABLE IF NOT EXISTS event_state (
+  event_id TEXT PRIMARY KEY,
+  scan_id INTEGER NOT NULL,
+  event_type TEXT NOT NULL DEFAULT '',
+  payload TEXT, processed_at TEXT, followup_task_ids TEXT,
+  FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+CREATE TABLE IF NOT EXISTS followup_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_id INTEGER NOT NULL,
+  trigger_finding_id INTEGER,
+  proposed_action TEXT NOT NULL,
+  prerequisite_hash TEXT,
+  status TEXT DEFAULT 'pending',
+  created_at TEXT NOT NULL, executed_at TEXT,
+  FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
 """
 
 # İndekslər AYRI verilir: köhnə bazalarda çatışmayan sütunlar (məsələn
@@ -167,6 +216,10 @@ CREATE INDEX IF NOT EXISTS idx_cve_host ON cve_matches(host_id);
 CREATE INDEX IF NOT EXISTS idx_stage_scan ON stage_status(scan_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding ON evidence(finding_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_task_state_scan ON task_state(scan_id);
+CREATE INDEX IF NOT EXISTS idx_task_state_status ON task_state(scan_id, status);
+CREATE INDEX IF NOT EXISTS idx_event_state_scan ON event_state(scan_id);
+CREATE INDEX IF NOT EXISTS idx_followup_scan ON followup_queue(scan_id, status);
 """
 
 # Köhnə bazalara təhlükəsiz sütun əlavələri
@@ -575,3 +628,145 @@ def all_hosts(scan_id=None):
 def findings_all(scan_id=None):
     sid = effective_scan_id(scan_id)
     return get_db().execute("SELECT * FROM findings WHERE scan_id=?", (sid,)).fetchall()
+
+
+# --------------------------------------------------------------------------- #
+# Faza 2 (§4.2) — davamlı icra və bərpa
+# --------------------------------------------------------------------------- #
+def _json(value):
+    """`value`-u JSON sətrinə çevirir (`None` → `None`, sətir olduğu kimi)."""
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def upsert_task_state(task_id: str, scan_id: int, *, identity_hash: str = "",
+                      status: str = "queued", engine: str = "",
+                      endpoint: str = "", method: str = "GET", params: str = "",
+                      attempts: int = 0, last_error: str = "",
+                      result_data=None, created_at: str | None = None) -> None:
+    """Tapşırıq vəziyyətini davamlı saxlamaya yazır (upsert).
+
+    `created_at` yalnız İLK yazılışda təyin olunur (tarix qorunur).
+    `db` bu funksiyanın DOĞRULUĞUNU təsdiq etmir — `TaskLedger` yeganə həqiqət
+    mənbəyidir; burada saxlanan vəziyyət YALNIZ bərpa üçündür.
+    """
+    status = status if status in TASK_STATES else "queued"
+    conn = get_db()
+    with conn:
+        conn.execute(
+            "INSERT INTO task_state(task_id, scan_id, identity_hash, status, "
+            "engine, endpoint, method, params, created_at, updated_at, attempts,"
+            " last_error, result_data) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(task_id) DO UPDATE SET "
+            "status=excluded.status, engine=excluded.engine, "
+            "endpoint=excluded.endpoint, method=excluded.method, "
+            "params=excluded.params, updated_at=excluded.updated_at, "
+            "attempts=excluded.attempts, last_error=excluded.last_error, "
+            "result_data=excluded.result_data",
+            (task_id, int(scan_id), identity_hash or task_id, status, engine,
+             endpoint, method, params, created_at or _now(), _now(),
+             int(attempts), last_error, _json(result_data)))
+
+
+def load_task_state(scan_id: int, *, statuses=None):
+    """Bir skanın davamlı tapşırıq sətirlərini qaytarır (skan izolyasiyası)."""
+    sql = "SELECT * FROM task_state WHERE scan_id=?"
+    params: list = [int(scan_id)]
+    if statuses:
+        marks = ",".join("?" * len(statuses))
+        sql += f" AND status IN ({marks})"
+        params.extend(statuses)
+    sql += " ORDER BY created_at, task_id"
+    return get_db().execute(sql, params).fetchall()
+
+
+def upsert_event_state(event_id: str, scan_id: int, *, event_type: str = "",
+                       payload=None, processed_at: str | None = None,
+                       followup_task_ids=None) -> None:
+    """Zəncir hadisəsinin davamlı vəziyyətini yazır (upsert)."""
+    conn = get_db()
+    with conn:
+        conn.execute(
+            "INSERT INTO event_state(event_id, scan_id, event_type, payload, "
+            "processed_at, followup_task_ids) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(event_id) DO UPDATE SET "
+            "event_type=excluded.event_type, payload=excluded.payload, "
+            "processed_at=excluded.processed_at, "
+            "followup_task_ids=excluded.followup_task_ids",
+            (event_id, int(scan_id), event_type, _json(payload),
+             processed_at or _now(), _json(followup_task_ids)))
+
+
+def load_event_state(scan_id: int):
+    """Bir skanın davamlı hadisə sətirlərini qaytarır."""
+    return get_db().execute(
+        "SELECT * FROM event_state WHERE scan_id=? ORDER BY processed_at",
+        (int(scan_id),)).fetchall()
+
+
+def insert_followup(scan_id: int, proposed_action: str, *,
+                    trigger_finding_id: int | None = None,
+                    prerequisite_hash: str = "", status: str = "pending") -> int:
+    """Gözləyən davam testini növbəyə əlavə edir və `id` qaytarır."""
+    status = status if status in FOLLOWUP_STATUSES else "pending"
+    conn = get_db()
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO followup_queue(scan_id, trigger_finding_id, "
+            "proposed_action, prerequisite_hash, status, created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (int(scan_id), trigger_finding_id, proposed_action,
+             prerequisite_hash, status, _now()))
+    return cur.lastrowid or -1
+
+
+def set_followup_status(scan_id: int, prerequisite_hash: str, status: str) -> int:
+    """`prerequisite_hash`-ə uyğun GÖZLƏYƏN davam testinin statusunu dəyişir.
+
+    Yalnız həqiqətən icra olunmuş/nəticələnmiş davam testləri yenilənməlidir.
+    Qaytarır: dəyişdirilmiş sətir sayı.
+    """
+    status = status if status in FOLLOWUP_STATUSES else "failed"
+    conn = get_db()
+    with conn:
+        cur = conn.execute(
+            "UPDATE followup_queue SET status=?, executed_at=? "
+            "WHERE scan_id=? AND prerequisite_hash=? AND status='pending'",
+            (status, _now(), int(scan_id), prerequisite_hash))
+    return cur.rowcount or 0
+
+
+def load_followups(scan_id: int, *, status: str | None = None):
+    """Bir skanın davam testlərini qaytarır (default: hamısı, sıralı)."""
+    sql = "SELECT * FROM followup_queue WHERE scan_id=?"
+    params: list = [int(scan_id)]
+    if status is not None:
+        sql += " AND status=?"
+        params.append(status)
+    sql += " ORDER BY id"
+    return get_db().execute(sql, params).fetchall()
+
+
+def running_scans():
+    """`running` statusunda qalmış skanlar (çökmüş/interrupted).
+
+    Uğurlu skanlar `_pipeline` `finally`-də `finish_scan` ilə bağlanır;
+    SIGKILL/power-off zamanı isə sətir `running` qalır → bu, bərpa namizədidir.
+    """
+    return get_db().execute(
+        "SELECT * FROM scans WHERE status='running' ORDER BY id DESC").fetchall()
+
+
+def get_scan(scan_id: int):
+    """Tək skanın sətri (yoxdursa `None`)."""
+    return get_db().execute(
+        "SELECT * FROM scans WHERE id=?", (int(scan_id),)).fetchone()
+
+
+def latest_running_scan():
+    """Ən son yarımçıq (running) skan və ya `None`."""
+    rows = running_scans()
+    return rows[0] if rows else None
+

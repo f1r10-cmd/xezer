@@ -13,15 +13,19 @@ Prinsiplər:
   * Yalnız BOUNDED retry: `failed`/`timed_out`/`cancelled` hallarında
     `max_attempts`-dən çox olmayaraq təkrar icazə verilir.
   * Heç bir qərar SƏSSİZCƏ verilmir — hər biri səbəblə qeyd olunur.
-  * Defolt olaraq BİR PROSES daxilində (skan) işləyir. Skan tək prosesdə
-    icra olunduğu üçün bu kifayətdir (bax: `qbh/urlintel.py` audit qeydi) —
-    davamlı (durable) saxlama tələb olunmur və DB miqrasiyası TƏLƏB EDİLMİR.
+  * Defolt olaraq BİR PROSES daxilində (skan) işləyir. **Faza 2 (§4):** əlavə
+    olaraq OPSİONAL davamlı saxlama (`store=`) dəstəklənir — çökmədən sonra
+    bərpa üçün hər keçid `task_state`/`event_state`-ə yazılır. `store`
+    verilmədikdə davranış ƏVVƏLKİ kimidir (yalnız RAM).
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+_log = logging.getLogger("qbh.tasks")
 
 # --------------------------------------------------------------------------- #
 # Həyat dövrü
@@ -61,16 +65,24 @@ def _digest(parts) -> str:
 
 def task_identity(scan_id, engine: str, endpoint: str, *,
                   method: str = "GET", param: str = "", test_type: str = "",
-                  profile: str = "") -> str:
+                  profile: str = "", identity_level: str = "",
+                  identity: str = "") -> str:
     """Məntiqi tapşırığın DETERMİNİSTİK kimliyi.
 
     `endpoint` — `urlintel.endpoint_identity()` nəticəsi (sorğu parametrləri
     olmadan). Fərqli parametrlər `param` ilə ayrılır → `?id=1` ilə `?id=2`
     FƏRQLİ tapşırıqdır.
+
+    Faza 1 (§3.1): çox-səviyyəli URL kimliyi dəstəyi. `identity_level` və
+    `identity` verildikdə (`urlintel.URLIdentity.get(level)`) kimliyə əlavə
+    olunur. Hər ikisi boş olduqda davranış ƏVVƏLKİ kimidir (geriyə uyğun).
     """
-    return _digest([scan_id or 0, engine or "", endpoint or "",
-                    (method or "GET").upper(), param or "", test_type or "",
-                    profile or ""])
+    parts = [scan_id or 0, engine or "", endpoint or "",
+             (method or "GET").upper(), param or "", test_type or "",
+             profile or ""]
+    if identity_level or identity:
+        parts.extend([identity_level or "", identity or ""])
+    return _digest(parts)
 
 
 def event_identity(kind: str, detail: str = "") -> str:
@@ -95,6 +107,10 @@ class TaskRecord:
     reason: str = ""
     first_seen: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    #: Faza 2 (§4.2): mərhələnin nəticə datası (`sr.data` JSON) — bərpadan
+    #: sonra aşağı mərhələlər (məs. `deep_enum` → `recon`) onu istifadə edir
+    #: ki, davam İTİRİLMİŞ kəşfi TƏKRAR ETMƏDƏN əhatəni AZALTMAĞA BƏBƏB olmasın.
+    result_data: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -139,12 +155,18 @@ class TaskStats:
 
 
 class TaskLedger:
-    """Idempotentlik dəftəri — hər məntiqi tapşırıq üçün tək qeyd."""
+    """Idempotentlik dəftəri — hər məntiqi tapşırıq üçün tək qeyd.
 
-    def __init__(self, *, max_attempts: int = 3):
+    `store` (Faza 2, §4.2) verilərsə, hər vəziyyət keçidi davamlı saxlamaya
+    yazılır. `store=None` → yalnız RAM (əvvəlki davranış).
+    """
+
+    def __init__(self, *, max_attempts: int = 3, store=None):
         self.max_attempts = max(1, int(max_attempts))
         self.tasks: dict[str, TaskRecord] = {}
         self.stats = TaskStats()
+        #: Opsional davamlı saxlama adapteri (`recovery.DurableStore`).
+        self.store = store
 
     # ------------------------------------------------------------------ lookup
     def get(self, identity: str) -> TaskRecord | None:
@@ -169,6 +191,7 @@ class TaskLedger:
             self.tasks[identity] = rec
             self.stats.queued += 1
             self._sync_pending()
+            self._persist(identity)
             return TaskDecision(identity, True, STATE_QUEUED,
                                 "yeni tapşırıq — növbəyə əlavə edildi")
 
@@ -190,6 +213,7 @@ class TaskLedger:
                 rec.state = STATE_QUEUED
                 rec.reason = "məcburi təkrar (açıq səbəb göstərildi)"
                 self._sync_pending()
+                self._persist(identity)
                 return TaskDecision(identity, True, rec.state, rec.reason)
             self.stats.deduplicated += 1
             return TaskDecision(identity, False, rec.state,
@@ -209,6 +233,7 @@ class TaskLedger:
                           f"(cəhd {rec.attempts}/{self.max_attempts})")
             self.stats.retried += 1
             self._sync_pending()
+            self._persist(identity)
             return TaskDecision(identity, True, rec.state, rec.reason)
         self.stats.deduplicated += 1
         return TaskDecision(identity, False, rec.state,
@@ -243,7 +268,75 @@ class TaskLedger:
         elif state == STATE_SKIPPED:
             self.stats.skipped += 1
         self._sync_pending()
+        self._persist(identity)
         return rec
+
+    def _persist(self, identity: str) -> None:
+        """Keçiddən SONRA davamlı saxlamaya yazır (store yoxdursa no-op)."""
+        if self.store is None:
+            return
+        self.persist_to_db(identity)
+
+    def persist_to_db(self, identity: str | None = None, *,
+                      last_error: str = "", result_data=None) -> int:
+        """Tapşırıq(lar)ı davamlı saxlamaya yazır (bərpa üçün).
+
+        `identity=None` → bütün tapşırıqlar. `store` qoşulmayıbsa heç nə
+        edilmir (0 qaytarılır) — in-memory əməliyyat DƏYİŞMİR (geriyə uyğun).
+        Qaytarır: yazılmış sətir sayı.
+        """
+        if self.store is None:
+            return 0
+        if identity is not None:
+            rec = self.tasks.get(identity)
+            targets = [rec] if rec is not None else []
+        else:
+            targets = list(self.tasks.values())
+        written = 0
+        for rec in targets:
+            try:
+                data = result_data if result_data is not None \
+                    else (rec.result_data or None)
+                self.store.persist_task(rec, last_error=last_error,
+                                        result_data=data)
+                written += 1
+            except Exception as exc:      # pragma: no cover - DB əlçatmazdır
+                _log.warning("tapşırıq davamlı saxlanmadı (%s): %s",
+                             rec.identity, exc)
+        return written
+
+    def restore(self, records) -> dict:
+        """Davamlı vəziyyətdən tapşırıqları yükləyir (RAM dəftərini DOLDURUR).
+
+        * `running` → `cancelled` (retryable) kimi bərpa olunur: proses
+          çökdüyü üçün yarımçıq qalmış tapşırıq bounded şəkildə TƏKRAR
+          planlaşdırıla bilər (`consider` onu yenidən `queued` edəcək).
+        * `queued` → olduğu kimi (yenə planlaşdırılacaq).
+        * `completed`/`skipped`/digər terminal hallar OLDUĞU KİMİ qalır →
+          TƏKRAR İCRA OLUNMUR (`consider` `create=False` qaytarır).
+        * `attempts`/`reason` tarixçəsi QORUNUR.
+
+        Qaytarır: `{"restored", "requeued", "terminal"}` sayları.
+        """
+        counts = {"restored": 0, "requeued": 0, "terminal": 0}
+        for rec in records or ():
+            if rec is None or not getattr(rec, "identity", ""):
+                continue
+            if rec.identity in self.tasks:
+                continue
+            if rec.state == STATE_RUNNING:
+                rec.state = STATE_CANCELLED
+                rec.reason = "bərpa: proses çökdü → yenidən növbəyə"
+                counts["requeued"] += 1
+            elif rec.state in (STATE_QUEUED, STATE_CANCELLED, STATE_FAILED,
+                               STATE_TIMED_OUT, STATE_PARTIAL):
+                counts["requeued"] += 1
+            else:
+                counts["terminal"] += 1
+            self.tasks[rec.identity] = rec
+            counts["restored"] += 1
+        self._sync_pending()
+        return counts
 
     def _sync_pending(self) -> None:
         self.stats.pending = self.pending
@@ -294,12 +387,17 @@ class EventLedger:
     İCRASININ deduplikasiyası `TaskLedger`-in işidir. İkisi AYRIDIR.
     """
 
-    def __init__(self, *, max_depth: int = 3, max_attempts: int = 3):
+    def __init__(self, *, max_depth: int = 3, max_attempts: int = 3,
+                 store=None):
         self.max_depth = max(0, int(max_depth))
         self.max_attempts = max(1, int(max_attempts))
         self.seen: dict[str, int] = {}          # hadisə kimliyi → sayı
         self.links: dict[tuple, int] = {}       # (mənbə, hədəf) → cəhd sayı
         self.stats = EventStats()
+        #: Opsional davamlı saxlama adapteri (`recovery.DurableStore`).
+        self.store = store
+        #: Hadisə kimliyi → `event_type` (bərpa üçün).
+        self.kinds: dict[str, str] = {}
 
     def accept(self, kind: str, detail: str = "") -> EventDecision:
         """Təkrarlanan hadisəni rədd edir (eyni kind+detail)."""
@@ -310,10 +408,13 @@ class EventLedger:
             self.seen[ident] = count + 1
             self.stats.duplicate += 1
             self.stats.suppressed += 1
+            self._persist_event(ident, kind, detail)
             return EventDecision(False, "dublikat zəncir hadisəsi (eyni "
                                         "kind+detail)", ident)
         self.seen[ident] = 1
+        self.kinds[ident] = kind
         self.stats.emitted += 1
+        self._persist_event(ident, kind, detail)
         return EventDecision(True, "yeni zəncir hadisəsi", ident)
 
     def guard(self, *, source: str, destination: str,
@@ -342,6 +443,52 @@ class EventLedger:
                                  f"({source}→{destination}, cəhd {attempts})")
         self.stats.scheduled += 1
         return EventDecision(True, f"{source}→{destination} planlaşdırıldı")
+
+    def _persist_event(self, ident: str, kind: str, detail: str) -> None:
+        """Hadisəni davamlı saxlamaya yazır (store yoxdursa no-op)."""
+        if self.store is None:
+            return
+        try:
+            self.store.persist_event(ident, event_type=kind,
+                                     count=self.seen.get(ident, 1),
+                                     detail=detail)
+        except Exception as exc:          # pragma: no cover - DB əlçatmazdır
+            _log.warning("hadisə davamlı saxlanmadı (%s): %s", ident, exc)
+
+    def persist_to_db(self) -> int:
+        """Bütün görülmüş hadisələri davamlı saxlamaya yazır (0: store yoxdur)."""
+        if self.store is None:
+            return 0
+        written = 0
+        for ident, count in self.seen.items():
+            try:
+                self.store.persist_event(ident,
+                                         event_type=self.kinds.get(ident, ""),
+                                         count=count)
+                written += 1
+            except Exception as exc:      # pragma: no cover
+                _log.warning("hadisə davamlı saxlanmadı (%s): %s", ident, exc)
+        return written
+
+    def restore(self, events) -> int:
+        """Davamlı vəziyyətdən görülmüş hadisələri bərpa edir.
+
+        `events` — `(event_id, event_type, count)` üçlüklərinin ardıcıllığı.
+        Təkrarlanan hadisələr YENİDƏN emal edilməsin deyə `seen` doldurulur.
+        Qaytarır: bərpa olunmuş hadisə sayı.
+        """
+        restored = 0
+        for item in events or ():
+            try:
+                ident, kind, count = item
+            except (TypeError, ValueError):
+                continue
+            if not ident or ident in self.seen:
+                continue
+            self.seen[ident] = max(1, int(count or 1))
+            self.kinds[ident] = kind or ""
+            restored += 1
+        return restored
 
     def snapshot(self) -> dict:
         return self.stats.to_dict()

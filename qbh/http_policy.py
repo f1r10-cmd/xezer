@@ -134,6 +134,7 @@ class HttpPolicy:
         transport=None,
         per_host_concurrency: int | None = None,
         metrics=None,
+        cache=None,
     ):
         self.scope = scope
         self.rate = float(rate)
@@ -168,6 +169,9 @@ class HttpPolicy:
         self.transport_requests = 0
         #: Faza 0 (§3): skan-scoped, bounded metrika kollektoru (opsional).
         self.metrics = metrics
+        #: Faza 1 (§3.5): opsional cavab keşi. `None` → keş YOXDUR (əvvəlki
+        #: davranış). Keş yalnız çağıran `cache_meta` verdikdə işə düşür.
+        self.cache = cache
         self._state: dict[str, _HostState] = defaultdict(_HostState)
         self.block_events: list[BlockEvent] = []
         self.rotation_events: list[dict] = []
@@ -321,6 +325,7 @@ class HttpPolicy:
         allow_redirects: bool = False,
         retries: int | None = None,
         observe_block: bool = True,
+        cache_meta: dict | None = None,
         **kwargs,
     ) -> HttpResponse:
         try:
@@ -329,6 +334,17 @@ class HttpPolicy:
         except ScopeError as exc:
             raise ScopeError(
                 f"sorğu scope xaricində bloklandı: {url} ({exc})") from exc
+
+        # ---- Faza 1 (§3.5): keşə BAX sorğudan ƏVVƏL (yalnız GET) ----
+        # Scope yoxlaması ARTIQ keçdi (icazəsiz hədəf keşdən də qaytarılmır).
+        # Keş HIT olduqda rate limit gözlənilmir və HTTP trafiki YARADILMIR.
+        use_cache = (self.cache is not None and cache_meta is not None
+                     and method.upper() == "GET")
+        if use_cache:
+            hit = self.cache.lookup(method="GET", **cache_meta)
+            if hit is not None:
+                return HttpResponse(hit.status, dict(hit.headers), hit.body_head,
+                                    url, 0.0, hit.truncated)
 
         await self.acquire(host)
 
@@ -415,6 +431,10 @@ class HttpPolicy:
 
             if observe_block or status not in (403, 429):
                 self.record(host, status, head, sink=events)
+            # ---- Faza 1 (§3.5): cavabı keşə YAZ (yalnız uğurlu GET) ----
+            if use_cache and status not in (403, 429):
+                self.cache.store(method="GET", status=status, headers=head,
+                                 body=text, **cache_meta)
             return HttpResponse(status, head, text, current, elapsed, truncated)
 
     def _use_transport(self) -> bool:

@@ -1,0 +1,158 @@
+{
+  "concurrency_avg": 3.1824,
+  "concurrency_peak": 4,
+  "deferred_by_engine": {
+    "jwt": 120,
+    "sourcecode": 72,
+    "sqli": 24,
+    "ssrf": 60,
+    "ssti": 24,
+    "xss": 24
+  },
+  "deferred_tasks": 324,
+  "duplicate_tasks": 148,
+  "eligible_total": 384,
+  "engine_execution_coverage": {
+    "api": {
+      "eligible": 12,
+      "executed": 12,
+      "requests": 12
+    },
+    "content": {
+      "eligible": 72,
+      "executed": 49,
+      "requests": 49
+    },
+    "js": {
+      "eligible": 12,
+      "executed": 1,
+      "requests": 1
+    },
+    "jwt": {
+      "eligible": 0,
+      "executed": 0,
+      "requests": 0
+    },
+    "library_cve": {
+      "eligible": 12,
+      "executed": 1,
+      "requests": 1
+    },
+    "param": {
+      "eligible": 72,
+      "executed": 49,
+      "requests": 49
+    },
+    "sourcecode": {
+      "eligible": 48,
+      "executed": 4,
+      "requests": 4
+    },
+    "sqli": {
+      "eligible": 48,
+      "executed": 36,
+      "requests": 36
+    },
+    "ssrf": {
+      "eligible": 12,
+      "executed": 12,
+      "requests": 12
+    },
+    "ssti": {
+      "eligible": 48,
+      "executed": 36,
+      "requests": 36
+    },
+    "xss": {
+      "eligible": 48,
+      "executed": 36,
+      "requests": 36
+    }
+  },
+  "evidence_records": 36,
+  "excluded_by_engine": {
+    "api": 108,
+    "content": 48,
+    "js": 108,
+    "library_cve": 108,
+    "param": 48,
+    "sqli": 48,
+    "ssrf": 48,
+    "ssti": 48,
+    "xss": 48
+  },
+  "executed": 236,
+  "failed_tasks": 0,
+  "findings_by_confidence": {
+    "tentative": 36
+  },
+  "findings_by_severity": {
+    "medium": 36
+  },
+  "rate_limit_responses": 2,
+  "requests_per_engine": {
+    "api": 12,
+    "content": 49,
+    "js": 1,
+    "library_cve": 1,
+    "param": 49,
+    "sourcecode": 4,
+    "sqli": 36,
+    "ssrf": 12,
+    "ssti": 36,
+    "xss": 36
+  },
+  "scheduler_queue_time_avg": 0.036364,
+  "skipped_reasons": {
+    "SKIPPED: api \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 24,
+    "SKIPPED: css \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 12,
+    "SKIPPED: css \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 24,
+    "SKIPPED: dynamic \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 36,
+    "SKIPPED: dynamic \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 72,
+    "SKIPPED: image \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 12,
+    "SKIPPED: image \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 24,
+    "SKIPPED: javascript \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 12,
+    "SKIPPED: search \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 12,
+    "SKIPPED: search \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 24,
+    "SKIPPED: static \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 12,
+    "SKIPPED: static \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 24,
+    "SKIPPED: statik resurs (css)": 12,
+    "SKIPPED: statik resurs (css) \u2014 SQLI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (css) \u2014 SSRF m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (css) \u2014 SSTI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (css) \u2014 XSS m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (css) \u2014 parametr k\u0259\u015ffi \u00fc\u00e7\u00fcn m\u0259nas\u0131z": 12,
+    "SKIPPED: statik resurs (image)": 12,
+    "SKIPPED: statik resurs (image) \u2014 SQLI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (image) \u2014 SSRF m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (image) \u2014 SSTI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (image) \u2014 XSS m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (image) \u2014 parametr k\u0259\u015ffi \u00fc\u00e7\u00fcn m\u0259nas\u0131z": 12,
+    "SKIPPED: statik resurs (javascript)": 12,
+    "SKIPPED: statik resurs (javascript) \u2014 SQLI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (javascript) \u2014 SSRF m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (javascript) \u2014 SSTI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (javascript) \u2014 XSS m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (javascript) \u2014 parametr k\u0259\u015ffi \u00fc\u00e7\u00fcn m\u0259nas\u0131z": 12,
+    "SKIPPED: statik resurs (static)": 12,
+    "SKIPPED: statik resurs (static) \u2014 SQLI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (static) \u2014 SSRF m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (static) \u2014 SSTI m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (static) \u2014 XSS m\u00fch\u0259rriki \u00fc\u00e7\u00fcn uy\u011fun deyil": 12,
+    "SKIPPED: statik resurs (static) \u2014 parametr k\u0259\u015ffi \u00fc\u00e7\u00fcn m\u0259nas\u0131z": 12,
+    "SKIPPED: unknown \u2014 API m\u00fch\u0259rriki \u00fc\u00e7\u00fcn deyil": 12,
+    "SKIPPED: unknown \u2014 JS analizi \u00fc\u00e7\u00fcn deyil": 24
+  },
+  "skipped_tasks": 612,
+  "status_counts": {
+    "200": 162,
+    "302": 72,
+    "429": 2
+  },
+  "submitted": 236,
+  "timed_out_tasks": 0,
+  "total_duration": 0.0628,
+  "total_http_requests": 236,
+  "unique_endpoint_param_combos": 53,
+  "unique_endpoints": 53
+}

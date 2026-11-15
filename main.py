@@ -80,10 +80,53 @@ def build_parser() -> argparse.ArgumentParser:
                    help="race fixture-ə göndəriləcək sorğu sayı (maks 20)")
     p.add_argument("--race-concurrency", type=int, default=4,
                    help="race fixture concurrency (maks 5)")
+    # Faza 2 (§4.2/§14): davamlı icra və bərpa.
+    p.add_argument("--resume", nargs="?", const=-1, default=None, type=int,
+                   metavar="SCAN_ID",
+                   help="yarımçıq (çökmüş) skanı davam etdir; SCAN_ID "
+                        "verilməzsə ən son `running` skan seçilir")
+    p.add_argument("--pending-followups", dest="pending_followups",
+                   action="store_true",
+                   help="gözləyən davam testlərini (followup_queue) göstər")
+    p.add_argument("--scan-id", dest="scan_id", type=int, default=None,
+                   help="əməliyyatı konkret skana tətbiq et")
     return p
 
 
+def _show_pending_followups(args: argparse.Namespace) -> int:
+    """Gözləyən davam testlərini (`followup_queue`) göstərir (Faza 2 §4.2).
+
+    `--scan-id` verilməzsə ən son yarımçıq (running) skan, o yoxdursa ən son
+    skan seçilir.
+    """
+    from qbh import db
+
+    db.init_db()   # sxem (o cümlədən `followup_queue`) mövcud olsun
+    sid = getattr(args, "scan_id", None)
+    if sid is None:
+        row = db.latest_running_scan()
+        if row is None:
+            rows = db.get_db().execute(
+                "SELECT id FROM scans ORDER BY id DESC LIMIT 1").fetchone()
+            sid = rows["id"] if rows else None
+        else:
+            sid = row["id"]
+    if sid is None:
+        print("[i] Heç bir skan tapılmadı")
+        return EXIT_OK
+    rows = db.load_followups(int(sid), status="pending")
+    print(f"[i] Skan {sid}: {len(rows)} gözləyən davam testi")
+    for r in rows:
+        print(f"   #{r['id']} {r['proposed_action']} "
+              f"(prereq={r['prerequisite_hash'] or '-'})")
+    return EXIT_OK
+
+
 async def run(args: argparse.Namespace) -> int:
+    # Faza 2: davam-testləri sorğusu skan konfiqurasiyası olmadan da işləyir.
+    if getattr(args, "pending_followups", False):
+        return _show_pending_followups(args)
+
     cfg = Config.load(args.config)
     if getattr(args, "aggressiveness", None):
         cfg.aggressiveness = args.aggressiveness
@@ -95,6 +138,10 @@ async def run(args: argparse.Namespace) -> int:
           f"aktiv fuzz: {'ON' if cfg.is_allowed('active_fuzz') else 'OFF'}")
 
     conductor = Conductor(cfg, args)
+
+    if getattr(args, "resume", None) is not None:
+        sid = int(args.resume)
+        return await conductor.resume(None if sid <= 0 else sid)
 
     if args.mode == "install":
         return await conductor.install_only()

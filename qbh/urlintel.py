@@ -40,6 +40,7 @@ Cavab metadata-sı ilə təsnifatın dəqiqləşdirilməsi (Faza 2):
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
@@ -319,6 +320,159 @@ def extract_params(url: str, *, location: str = "query") -> tuple[Param, ...]:
 
 
 # --------------------------------------------------------------------------- #
+# Çox-səviyyəli URL kimliyi (Faza 1, §3.1)
+# --------------------------------------------------------------------------- #
+#: Kimlik səviyyələri — HƏR biri ÖZ test məqsədi üçündür və QARIŞDIRILMIR.
+#: Bir səviyyədə birləşdirmə YALNIZ o test növü üçün təhlükəsizdirsə edilir.
+IDENTITY_LEVELS = ("infra", "testing", "param", "idor", "auth")
+
+_IDENTITY_REASONS = {
+    "infra": ("İnfrastruktur kəşfi: yalnız sxem+host+port — yol, parametr, "
+              "metod və obyekt ID-ləri BURAXILIR ki, eyni xidmət bir host kimi "
+              "qruplaşsın (/user/1 ilə /user/2 eyni infrastrukturdur)."),
+    "testing": ("Ümumi zəiflik testi: sxem+host+port+yol+METOD. Parametr "
+                "DƏYƏRLƏRİ buraxılır — onlar `param` səviyyəsində qorunur; "
+                "metod AYRI saxlanılır (GET/POST fərqli testdir)."),
+    "param": ("Parametr testi: üstəlik parametr ADI və DƏYƏRİ. `?id=1` ilə "
+              "`?id=2` AYRILIR — dəyər semantik fərqdir, birləşdirilmir."),
+    "idor": ("IDOR/BOLA: üstəlik istifadəçi-kontekst markerləri və obyekt "
+             "ID-ləri. Rəqəmsal/UUID/hash yol seqmentləri QORUNUR — onlar "
+             "dəyişdirilə bilən obyekt açarıdır (birləşdirmə təhlükəsiz deyil)."),
+    "auth": ("Autentifikasiya konteksti: üstəlik auth halı (sessiya/rol/"
+             "token). Fərqli auth kontekstdə eyni yol AYRILIR — sorğu "
+             "eyniləşdirilməsi dəyişir."),
+}
+
+
+def _identity_host(url: str) -> str:
+    """Sxem + host + qeyri-default port (default port silinir)."""
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return ""
+    scheme = (p.scheme or "http").lower()
+    try:
+        host = (p.hostname or "").lower()
+    except ValueError:
+        host = ""
+    if not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    if port and port != DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def _identity_path(url: str) -> str:
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return "/"
+    return normalize_path(path)
+
+
+def _identity_query(url: str) -> str:
+    try:
+        query = urlsplit(url).query
+    except ValueError:
+        return ""
+    return normalize_query(query)
+
+
+def _object_segments(url: str) -> tuple[str, ...]:
+    """Yoldaki rəqəmsal/UUID/hash seqmentlər (obyekt ID-ləri), SIRA ilə.
+
+    Bunlar IDOR/BOLA testində dəyişən açar ola bilər → `idor_id`-də QORUNUR.
+    """
+    path = _identity_path(url)
+    return tuple(seg for seg in path.split("/")
+                 if seg and (_NUM_SEG.match(seg) or _UUID_SEG.match(seg)
+                             or _HASH_SEG.match(seg)))
+
+
+def _identity_hash(level: str, payload: str) -> str:
+    raw = f"{level}\x1f{payload}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass
+class URLIdentity:
+    """Bir URL üçün ÇOX-SƏVİYYƏLİ kimliklər (normalizasiya ORİJİNALI silmir).
+
+    Hər səviyyə fərqli test məqsədi üçün təhlükəsiz birləşdirmə dərəcəsini
+    təmsil edir; heç bir səviyyə digərini əvəz etmir.
+    """
+
+    original: str
+    method: str = "GET"
+    auth_context: str = ""
+    infra_id: str = ""
+    testing_id: str = ""
+    param_id: str = ""
+    idor_id: str = ""
+    auth_id: str = ""
+    reasons: dict = field(default_factory=dict)
+
+    def get(self, level: str) -> str:
+        """Səviyyə adı ilə kimliyi qaytarır (naməlum səviyyə → boş sətir)."""
+        if level not in IDENTITY_LEVELS:
+            return ""
+        return getattr(self, f"{level}_id")
+
+    def reason(self, level: str) -> str:
+        """Verilmiş səviyyənin NİYƏ təhlükəsiz olduğunu izah edir."""
+        return str(self.reasons.get(level, ""))
+
+    def preserves_original(self) -> bool:
+        """Normalizasiya orijinalı saxlayıbmı (həmişə `True` olmalıdır)."""
+        return bool(self.original)
+
+    def as_dict(self) -> dict:
+        return {level: self.get(level) for level in IDENTITY_LEVELS}
+
+
+def url_identity(url: str, *, method: str = "GET",
+                 auth_context: str = "") -> URLIdentity:
+    """URL-dən çox-səviyyəli kimlik qurur (DETERMİNİSTİK, şəbəkəsiz).
+
+    Birləşdirmə qaydaları:
+      * `infra_id`  → yalnız host (yol/parametr/metod/obyekt ID-ləri buraxılır);
+      * `testing_id`→ + yol + metod (parametr DƏYƏRLƏRİ buraxılır);
+      * `param_id`  → + parametr adı və dəyəri;
+      * `idor_id`   → + obyekt ID-ləri (rəqəmsal/UUID/hash seqmentlər);
+      * `auth_id`   → + auth konteksti.
+
+    Orijinal URL həmişə `original`-də SAXLANILIR — normalizasiya onu silmir.
+    """
+    raw = "" if url is None else str(url)
+    m = (method or "GET").upper()
+    ac = auth_context or ""
+    host_base = _identity_host(raw)
+    path = _identity_path(raw)
+    query = _identity_query(raw)
+    objs = _object_segments(raw)
+
+    base_payload = "\x1f".join([host_base, path, m])
+    with_query = base_payload + "\x1f" + query
+    return URLIdentity(
+        original=raw,
+        method=m,
+        auth_context=ac,
+        infra_id=_identity_hash("infra", host_base),
+        testing_id=_identity_hash("testing", base_payload),
+        param_id=_identity_hash("param", with_query),
+        idor_id=_identity_hash("idor", with_query + "\x1f" + "/".join(objs)),
+        auth_id=_identity_hash("auth", base_payload + "\x1f" + ac),
+        reasons=dict(_IDENTITY_REASONS),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Təsnifat
 # --------------------------------------------------------------------------- #
 def _extension(path: str) -> str:
@@ -482,10 +636,102 @@ def families(endpoints) -> dict[str, list[str]]:
 @dataclass(frozen=True)
 class Decision:
     engine: str
-    eligible: bool | None          # True | False | None (deferred)
-    status: str                    # eligible | ineligible | deferred
+    eligible: bool | None          # True | False | None (deferred/unknown)
+    status: str                    # eligible | ineligible | deferred | unknown
     reason: str
     evidence: str = ""
+
+
+#: Uyğunluq halları (Faza 1, §3.2 — 4 hallı).
+STATUS_ELIGIBLE = "eligible"
+STATUS_INELIGIBLE = "ineligible"
+STATUS_DEFERRED = "deferred"
+#: Texnologiya profili (fingerprint) MÖVCUD DEYİL və ya NATAMAMdır.
+#: Bu, `ineligible` DEYİL — mühərrik HƏLƏ DƏ tətbiq oluna bilər → test edilir.
+STATUS_UNKNOWN = "unknown"
+
+
+#: Texnologiya (fingerprint) ÖN ŞƏRTİ olan mühərriklər. Fingerprint məlumatı
+#: yoxdursa/natamamdırsa, bu mühərriklər üçün `unknown` qaytarılır — onları
+#: `ineligible` etmək naməlumluq üzündən testi SUSTURMAQ olardı (qadağandır).
+TEMPLATE_TECHS = frozenset({
+    "php", "wordpress", "drupal", "joomla", "express", "nodejs", "django",
+    "flask", "jinja2", "twig", "rails", "laravel", "thymeleaf", "spring",
+    "aspnet", "mako", "velocity", "freemarker", "handlebars", "ejs",
+})
+AUTH_TECHS = frozenset({
+    "jwt", "oauth", "oidc", "auth0", "keycloak", "okta", "express", "nodejs",
+    "php", "django", "flask", "spring", "rails", "laravel", "aspnet",
+})
+LIBRARY_TECHS = frozenset({
+    "nodejs", "express", "react", "vue", "angular", "jquery", "bootstrap",
+    "ember", "svelte", "nextjs", "nuxt", "webpack",
+})
+
+FINGERPRINT_REQUIRES = {
+    "ssti": TEMPLATE_TECHS,
+    "jwt": AUTH_TECHS,
+    "library_cve": LIBRARY_TECHS,
+}
+FINGERPRINT_GATED = tuple(FINGERPRINT_REQUIRES)
+
+
+@dataclass(frozen=True)
+class Fingerprint:
+    """Tətbiq texnologiya profili (təsnifat/uyğunluq üçün).
+
+    `complete=False` → profil NATAMAMdır (məsələn yalnız `nginx` bilinir, lakin
+    backend texnologiyası hələ məlum deyil). Bu halda texnologiya-şərtli
+    mühərriklər `unknown` qaytarır → test EDİLİR (atılmır).
+    `complete=True` → profil bütövdür; texnologiya açıq şəkildə müəyyən
+    mühərriki inkar edirsə, `ineligible` (səbəblə) qaytarıla bilər.
+    """
+
+    technologies: frozenset = frozenset()
+    complete: bool = False
+    source: str = ""
+
+    @classmethod
+    def from_iterable(cls, techs, *, complete: bool = True,
+                      source: str = "") -> "Fingerprint":
+        items = frozenset(
+            str(t).strip().lower() for t in (techs or ()) if str(t).strip())
+        return cls(items, bool(complete), source)
+
+
+def compute_eligibility(ep: Endpoint, engine: str, *,
+                        fingerprint: "Fingerprint | None" = None) -> Decision:
+    """4-hallı uyğunluq: `eligible | ineligible | deferred | unknown`.
+
+    `fingerprint=None` → yalnız URL-nümunəsi üzrə qiymətləndirmə (geriyə
+    uyğun `evaluate()` davranışı — dəyişmir).
+
+    `fingerprint` verildikdə texnologiya-şərtli mühərriklər üçün:
+      * profil NATAMAMdırsa → `unknown` (MAY still apply → test edilir);
+      * profil bütövdürsə və tələb olunan texnologiyanı ehtiva etmirsə →
+        `ineligible` (açıq səbəblə);
+      * profil tələbi ödəyirsə → əsas (`evaluate`) qərarı qalır.
+    URL-nümunəsi özü qəti şəkildə istisna edirsə (statik resurs), həmişə
+    `ineligible` qalır — fingerprint bu qərarı YUMŞALTMAZ.
+    """
+    base = evaluate(ep, engine)
+    if fingerprint is None or engine not in FINGERPRINT_REQUIRES:
+        return base
+    if base.status == STATUS_INELIGIBLE:
+        return base                     # URL özü qəti istisna edir
+    need = FINGERPRINT_REQUIRES[engine]
+    if not fingerprint.complete:
+        return Decision(
+            engine, None, STATUS_UNKNOWN,
+            f"UNKNOWN: texnologiya profili natamamdır — {engine.upper()} "
+            "hələ də tətbiq oluna bilər (test edilir)", ep.original)
+    techs = {str(t).lower() for t in fingerprint.technologies}
+    if techs & need:
+        return base
+    return Decision(
+        engine, False, STATUS_INELIGIBLE,
+        f"SKIPPED: texnologiya profili {engine.upper()} üçün tələb olunan "
+        f"texnologiyanı ehtiva etmir ({','.join(sorted(need))})", ep.original)
 
 
 #: Dinamik injeksiya testi aparan mühərriklər. `param` BURADA DEYİL: o,

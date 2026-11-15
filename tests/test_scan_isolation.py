@@ -212,7 +212,8 @@ class TestMigrationV5:
             conn = db.get_db()
             tables = {r["name"] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-            assert {"evidence", "stage_status", "validated"} <= tables
+            assert {"evidence", "stage_status", "validated",
+                    "task_state", "event_state", "followup_queue"} <= tables
 
             fcols = {r["name"] for r in conn.execute(
                 "PRAGMA table_info(findings)")}
@@ -226,7 +227,7 @@ class TestMigrationV5:
 
             assert conn.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()["value"] == "6"
+            ).fetchone()["value"] == str(db.SCHEMA_VERSION)
 
             # Data və id-lər qorunur; köhnə status yeni həyat dövrünə köçür.
             f = conn.execute("SELECT id,status FROM findings WHERE id=11"

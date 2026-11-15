@@ -17,6 +17,7 @@ import time
 import traceback
 
 from . import db
+from . import recovery as rcv
 from .adaptive import AdaptiveController
 from .antiblock.guardian import Guardian
 from .antiblock.identity import IdentityManager
@@ -57,9 +58,30 @@ from .results import EngineResult, StageResult, now_iso
 from .scheduler import (HOST_GLOBAL, SchedTask, Scheduler,
                         submit_with_backpressure)
 from .scope import ScopeError
-from .tasks import (EventLedger, STATE_FAILED, TaskLedger, task_identity)
+from .tasks import (EventLedger, STATE_CANCELLED, STATE_COMPLETED,
+                    STATE_FAILED, STATE_PARTIAL, STATE_RUNNING, STATE_SKIPPED,
+                    TaskLedger, task_identity)
 
 _log = logging.getLogger("qbh.conductor")
+
+#: `StageResult.status` → dəftər həyat dövrü (davamlı saxlama üçün).
+_SR_TO_STATE = {
+    "ok": STATE_COMPLETED,
+    "partial": STATE_PARTIAL,
+    "failed": STATE_FAILED,
+    "skipped": STATE_SKIPPED,
+    "cancelled": STATE_CANCELLED,
+}
+
+#: Dəftər həyat dövrü → `StageResult.status` (bərpa/dedup zamanı göstərilir).
+#: `queued`/`running` (eyni icrada dublikat) → `skipped` (icra OLUNMADI).
+_STATE_TO_SR = {
+    STATE_COMPLETED: "ok",
+    STATE_PARTIAL: "partial",
+    STATE_FAILED: "failed",
+    STATE_SKIPPED: "skipped",
+    STATE_CANCELLED: "cancelled",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -222,6 +244,10 @@ class Conductor:
                 getattr(args, "allow_state_changing", False)))
 
         self.scan_id: int | None = None
+        #: Faza 2 (§4.2): davamlı saxlama adapteri (`recovery.DurableStore`) —
+        #: skan başlayanda qoşulur. Bərpa planı `--resume` zamanı saxlanılır.
+        self.store = None
+        self._resume_plan = None
         self.stages: list[StageResult] = []
         self.authorized_targets: list[str] = []
         self.tool_report = None
@@ -306,12 +332,48 @@ class Conductor:
         return 0 if not report.missing_required else 1
 
     # ---------------- stage runner ----------------
+    def _stage_identity(self, stage: str, target: str) -> str:
+        """Mərhələ tapşırığının DETERMİNİSTİK kimliyi.
+
+        Hədəf-üzrə mərhələlər (məs. recon zənciri) `target` ilə AYRILIR ki,
+        çox-hədəfli skanda ikinci hədəf BİRİNCİNİN nəticəsi ilə səhvən
+        dedup OLUNMASIN (əhatə azalmasın). Qlobal mərhələlərdə `target=""`
+        → `stage` açarı işlədilir (mövcud `_submit_stage` sxemi ilə eyni).
+        """
+        return task_identity(self.scan_id, stage, target or stage,
+                             test_type="stage")
+
     async def _run_stage(self, stage: str, target: str, factory) -> StageResult:
         """Mərhələni icra edir və strukturlaşdırılmış nəticə qaytarır.
 
         `factory` çağırılandır (callable → coroutine); beləliklə əvvəlki
         mərhələ uğursuz olsa belə lazımsız korutin yaradılmır.
+
+        Faza 2 (§4.3): mərhələ TƏK həqiqət mənbəyindən (`TaskLedger`) keçir —
+        artıq `completed`/`skipped` olan tapşırıq TƏKRAR İCRA OLUNMUR (bərpada
+        iş təkrarlanmır), nəticə datası (`sr.data`) isə davamlı saxlanır ki,
+        aşağı mərhələlər ondan istifadə edə bilsin.
+
+        Sahiblik (ownership) iki yolla müəyyən olunur:
+          * **Paralel yol** — `_submit_stage` tapşırığı `Scheduler`-ə verir və
+            Scheduler `task.run()`-dan ƏVVƏL dəftərdə `running` işarələyir.
+            Bu halda həyat dövrünü Scheduler idarə edir → biz `consider`
+            ETMİRİK, yalnız nəticə datasını saxlayırıq.
+          * **Birbaşa yol** — mərhələ boru xətləri (`run_recon`/`run_vuln`)
+            `_run_stage`-i birbaşa çağırır; burada qərarı BİZ `consider` ilə
+            alırıq və həyat dövrünü özümüz yazırıq.
         """
+        identity = self._stage_identity(stage, target)
+        rec = self.task_ledger.get(identity)
+        if rec is not None and rec.state == STATE_RUNNING:
+            owned = False
+        else:
+            decision = self.task_ledger.consider(
+                identity, engine=stage, endpoint=target or stage,
+                test_type="stage")
+            if not decision.create:
+                return self._record_dedup(stage, decision.reason, identity)
+            owned = True
         sr = StageResult(stage=stage, target=target, status="running",
                          started_at=now_iso())
         label = f"{stage} · {target}" if target else stage
@@ -326,6 +388,7 @@ class Conductor:
             _log.warning("stage ləğv edildi: scan_id=%s engine=%s host=%s",
                          self.scan_id, stage, target or "-")
             self._record(sr)
+            self._persist_stage(identity, sr, owned)
             raise
         except Exception as exc:  # noqa: BLE001 - sərhəddə tutulur və raportlanır
             sr.status = "failed"
@@ -354,11 +417,30 @@ class Conductor:
         sr.completed_at = now_iso()
         sr.duration = round(time.monotonic() - t0, 3)
         self._record(sr)
+        self._persist_stage(identity, sr, owned)
         marker = {"ok": "✓", "partial": "~", "skipped": "·",
                   "failed": "✗"}.get(sr.status, "?")
         print(f"   [{marker}] {label} — {sr.duration:.2f}s, "
               f"{sr.findings_count} tapıntı")
         return sr
+
+    def _persist_stage(self, identity: str, sr: StageResult,
+                       owned: bool) -> None:
+        """Mərhələnin nəticə datasını dəftərə yazır və (lazım gələrsə) vəziyyəti işarələyir.
+
+        `owned=False` (paralel mərhələ) halında həyat dövrünü `Scheduler`
+        işarələyir — biz yalnız `result_data`-nı qeyd edirik.
+        """
+        rec = self.task_ledger.get(identity)
+        if rec is not None and isinstance(sr.data, dict):
+            rec.result_data = dict(sr.data)
+        if not owned:
+            return
+        state = _SR_TO_STATE.get(sr.status)
+        if state is None or rec is None:
+            return
+        reason = "; ".join(sr.errors) if sr.errors else sr.status
+        self.task_ledger.mark(identity, state, reason)
 
     def _record(self, sr: StageResult) -> None:
         self.stages.append(sr)
@@ -414,11 +496,11 @@ class Conductor:
         mərhələ səssizcə ATILMIR — AÇIQ `skipped` kimi qeyd olunur (səbəblə).
         `submit()` rədd edərsə məhdud cəhd edilir; yenə alınmasa AÇIQ `failed`.
         """
-        identity = task_identity(self.scan_id, stage, stage, test_type="stage")
+        identity = self._stage_identity(stage, "")
         decision = self.task_ledger.consider(
             identity, engine=stage, endpoint=stage, test_type="stage")
         if not decision.create:
-            self._record_dedup(stage, decision.reason)
+            self._record_dedup(stage, decision.reason, identity)
             return
         # F-06: host-üzrə scope-u OLMAYAN mərhələlər üçün SƏNƏDLƏŞDİRİLMİŞ
         # ədalət açarı — real host UYDURULMUR, `family=stage` ayrı vedrə verir.
@@ -431,17 +513,27 @@ class Conductor:
                                   "scheduler backpressure: qəbul olunmadı")
             self._record_rejected(stage)
 
-    def _record_dedup(self, stage: str, reason: str) -> None:
-        """İdempotentlik səbəbilə təqdim edilməyən mərhələni AÇIQ qeyd edir (F-04).
+    def _record_dedup(self, stage: str, reason: str,
+                      identity: str = "") -> StageResult:
+        """İdempotentlik səbəbilə icra OLUNMAYAN mərhələni AÇIQ qeyd edir (F-04).
 
-        Mərhələ HEÇ VAXT səssizcə itmir: strukturlaşdırılmış `skipped` nəticə və
-        səbəb yazılır ki, hesabatda və metrikalarda görünsün.
+        Mərhələ HEÇ VAXT səssizcə itmir: strukturlaşdırılmış nəticə və səbəb
+        yazılır ki, hesabatda və metrikalarda görünsün. Tapşırıq ƏVVƏLKİ
+        icrada artıq TAMAMLANDIBSA (`completed`) status FAKTİKİ nəticəni
+        (`ok`) göstərir və davamlı saxlanmış `result_data` bərpa olunur ki,
+        aşağı mərhələlər (məs. `recon` üçün subdomain-lər) əhatəni itirməsin.
+        `queued`/`running` (eyni icrada dublikat) isə `skipped` qalır.
         """
-        sr = StageResult(stage=stage, target="", status="skipped",
+        rec = self.task_ledger.get(identity) if identity else None
+        status = _STATE_TO_SR.get(getattr(rec, "state", ""), "skipped")
+        sr = StageResult(stage=stage, target="", status=status,
                          started_at=now_iso(), completed_at=now_iso())
+        if rec is not None and isinstance(rec.result_data, dict):
+            sr.data = dict(rec.result_data)
         sr.warnings.append(f"idempotentlik: {reason}")
         self._record(sr)
         print(f"\n[▶] {stage}\n   [·] {stage} — idempotentlik: {reason}")
+        return sr
 
     def _merge_scheduler_totals(self, snap: dict) -> None:
         """Bütün planlaşdırıcı nüsxələrinin REAL icra saylarını toplayır (F-05).
@@ -656,10 +748,27 @@ class Conductor:
         if not imp.get("available"):
             print(f"  [i] TLS təqlidi əlçatan deyil: {imp.get('reason')}")
 
-    async def _pipeline(self, mode: str, body) -> None:
-        self.scan_id = db.start_scan(self.cfg.program, mode)
+    async def _pipeline(self, mode: str, body, *, scan_id: int | None = None,
+                        resume: bool = False) -> None:
+        """Skan boru xətti. `scan_id` verilərsə MÖVCUD skan davam etdirilir
+        (bərpa); əks halda yeni skan yaradılır.
+
+        Faza 2 (§4.2): hər mərhələ `DurableStore` ilə davamlı saxlamaya
+        qoşulur ki, proses çöksə belə iş İTİRMƏSİN. Saxlama YALNIZ bərpa
+        üçündür — in-memory dəftərlər əsas həqiqət mənbəyi qalır.
+        """
+        if scan_id is not None:
+            self.scan_id = int(scan_id)
+        else:
+            self.scan_id = db.start_scan(self.cfg.program, mode)
         self.ctx.scan_id = self.scan_id
         self.authorization.scan_id = self.scan_id
+        self.store = rcv.DurableStore(self.scan_id)
+        self.task_ledger.store = self.store
+        self.event_ledger.store = self.store
+        self.adaptive.store = self.store
+        if resume:
+            self._restore_durable()
         status = "completed"
         try:
             await self.ctx.oob.start()
@@ -699,10 +808,7 @@ class Conductor:
             self.print_summary()
 
     async def run_full(self) -> None:
-        async def body():
-            await self.run_recon()
-            await self.run_vuln()
-        await self._pipeline("full", body)
+        await self._pipeline("full", self._mode_body("full"))
 
     async def run_recon_mode(self) -> None:
         await self._pipeline("recon", self.run_recon)
@@ -710,3 +816,68 @@ class Conductor:
     async def run_vuln_mode(self) -> None:
         self.resolve_targets()
         await self._pipeline("vuln", self.run_vuln)
+
+    # ---------------- Faza 2 (§4.2/§4.3): bərpa ----------------
+    def _mode_body(self, mode: str):
+        """Rejim adına uyğun icra gövdəsini qaytarır (yeni skan və bərpa üçün ortaq)."""
+        if mode == "recon":
+            return self.run_recon
+        if mode == "vuln":
+            return self.run_vuln
+        if mode == "hunt":
+            from .hunter import Hunter
+
+            async def hunt_body():
+                await Hunter(self).hunt()
+            return hunt_body
+
+        async def full_body():
+            await self.run_recon()
+            await self.run_vuln()
+        return full_body
+
+    def _restore_durable(self) -> dict:
+        """Davamlı vəziyyətdən dəftərləri BƏRPA edir və scope-u YENİDƏN yoxlayır.
+
+        * `completed`/`skipped` tapşırıqlar olduğu kimi yüklənir → `consider`
+          onları TƏKRAR planlaşdırmır (iş təkrarlanmır).
+        * `running` (proses çökmüş) tapşırıqlar yenidən növbəyə alınır.
+        * Scope-dan kənar hədəflər AÇIQ `skipped` edilir (yenidən icra YOX).
+        * `attempts` / `reason` tarixçəsi QORUNUR.
+        """
+        plan = rcv.build_resume_plan(
+            self.scan_id, program=self.cfg.program,
+            authorize=self.cfg.authorize_target)
+        restored = self.task_ledger.restore(plan.tasks)
+        events = self.event_ledger.restore(plan.events)
+        followups = self.adaptive.restore_followups(plan.followups)
+        print(f"[↻] Bərpa (skan {self.scan_id}): {restored['restored']} tapşırıq "
+              f"yükləndi — təkrar növbə: {restored['requeued']}, "
+              f"terminal (təkrarlanmayacaq): {restored['terminal']}; "
+              f"{events} hadisə; {followups} gözləyən davam testi")
+        if plan.out_of_scope:
+            print(f"   [⛔] {len(plan.out_of_scope)} tapşırıq artıq scope "
+                  f"xaricindədir — icra OLUNMUR")
+        self._resume_plan = plan
+        return plan.to_dict()
+
+    async def resume(self, scan_id: int | None = None) -> int:
+        """Yarımçıq (çökmüş) skanı DAVAM ETDİRİR (Faza 2 §4.3).
+
+        `scan_id=None` → ən son `running` skan seçilir. Rejim davamlı `scans`
+        cədvəlindən oxunur; YENİ skan sətri yaradılmır — eyni `scan_id` davam
+        edir. Scope/avtorizasiya YENİDƏN yoxlanılır (fail-closed).
+        """
+        row = db.get_scan(int(scan_id)) if scan_id is not None \
+            else rcv.latest_pending_scan()
+        if row is None:
+            print("[i] Bərpa üçün yarımçıq (running) skan tapılmadı")
+            return 1
+        sid = int(row["id"])
+        mode = row["mode"] or "full"
+        print(f"[↻] Skan {sid} bərpa olunur (rejim: {mode})")
+        # Scope YENİDƏN yoxlanılır — bərpa avtorizasiyanı KEÇMİR (§4.3).
+        self.resolve_targets()
+        await self._pipeline(mode, self._mode_body(mode), scan_id=sid,
+                            resume=True)
+        return 0 if not self.failed_stages else 1

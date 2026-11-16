@@ -25,7 +25,7 @@ DB_PATH = os.environ.get("QBH_DB_PATH", "findings.db")
 #:  * v6 → secret vault (`secrets.value_enc`).
 #:  * v7 (Faza 2, §4) → davamlı icra/bərpa cədvəlləri: `task_state`,
 #:    `event_state`, `followup_queue`. Əlavə (additive) — mövcud data qorunur.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 #: Davamlı tapşırıq vəziyyətləri (`task_state.status`) — `tasks.LIFECYCLE` ilə
 #: eyni dəstdir. `db` `tasks`-dan asılı olmasın deyə burada KİMLİK şəkildə
@@ -129,6 +129,12 @@ CREATE TABLE IF NOT EXISTS test_plans (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plans_scan_status ON test_plans(scan_id,status);
+CREATE TABLE IF NOT EXISTS js_observations (
+ id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+ source_digest TEXT NOT NULL, content_digest TEXT NOT NULL, payload_enc BLOB,
+ summary TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_js_observations_scan ON js_observations(scan_id);
 CREATE TABLE IF NOT EXISTS plan_reconsiderations (
  id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
  prerequisite_hash TEXT NOT NULL, round INTEGER NOT NULL,

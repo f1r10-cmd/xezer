@@ -110,7 +110,63 @@ class JSAnalysisEngine:
                     continue
                 self._find_secrets(row, content, res)
                 self._find_endpoints(row, content, res)
+                from ..brain.js_intelligence import analyze, persist
+                observations = analyze(content, row["url"])
+                await self._source_maps(session, row, observations, res)
+                status = persist(self.ctx, row["url"], content, observations)
+                res.data.setdefault("js_intelligence", []).append({"source_id": row["id"], "status": status,
+                                                                  **observations.summary()})
+                for limitation in observations.limitations:
+                    res.warn("JS intelligence: " + limitation)
         return res
+
+    async def _source_maps(self, session, row, observations, res):
+        from ..brain.js_intelligence import analyze, source_map_sources
+        from urllib.parse import urlsplit, unquote
+        import base64
+        processed = 0
+        for item in list(observations.observations):
+            if item['kind'] != 'source_map':
+                continue
+            if processed >= 5:
+                item['map_status'] = 'deferred_source_map_budget'
+                continue
+            processed += 1
+            try:
+                url = item['value']
+                if url.startswith('data:'):
+                    prefix, data = url.split(',', 1)
+                    if len(data) > MAX_SIZE:
+                        raise ValueError('source_map_size_limit')
+                    content = base64.b64decode(data, validate=True).decode() if ';base64' in prefix else unquote(data)
+                else:
+                    self.ctx._auth().authorize_request('GET', url, 'jsanalysis')
+                    parts = urlsplit(url)
+                    if parts.query or parts.username or parts.password:
+                        item['map_status'] = 'deferred_credential_review'
+                        continue
+                    response = await self.guardian.get(session, url, allow_redirects=False)
+                    if response.status != 200 or response.truncated or len(response.text) > MAX_SIZE:
+                        item['map_status'] = 'deferred_source_map_response'
+                        continue
+                    content = response.text
+                sources = source_map_sources(content)
+                item['embedded_sources'] = sources
+                for index, source in enumerate(sources):
+                    if index >= 20:
+                        source['analysis_status'] = 'deferred_source_budget'
+                        continue
+                    if not isinstance(source['content'], str):
+                        continue
+                    child = analyze(source['content'], row['url'])
+                    self._find_secrets(row, source['content'], res)
+                    observations.observations.extend(child.observations)
+                    observations.limitations.extend(child.limitations)
+                    source['analysis_status'] = 'analyzed'
+                item['map_status'] = 'analyzed'
+            except Exception as exc:
+                item['map_status'] = 'deferred:' + type(exc).__name__
+                observations.limitations.append('source_map_unavailable:' + type(exc).__name__)
 
     async def _download_js(self, session, url: str, host: str) -> str | None:
         r = await self.guardian.get(session, url, allow_redirects=True)
@@ -153,8 +209,9 @@ class JSAnalysisEngine:
     def _find_endpoints(self, row, content: str, res: EngineResult) -> None:
         eps = set(_ENDPOINT_RE.findall(content))
         added = 0
-        for ep in list(eps)[:20]:
-            url = f"https://{row['subdomain']}{ep}"
+        from urllib.parse import urljoin
+        for ep in sorted(eps):
+            url = urljoin(row["url"], ep)
             if not self.cfg.in_scope(url):
                 continue
             db.insert_url(row["host_id"], url, "jsanalysis", False, scan_id=self.ctx.scan_id)

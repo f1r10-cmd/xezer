@@ -20,7 +20,7 @@ from .scope import ScopeEnforcer, ScopeError, normalize_host
 KNOWN_TOP_KEYS = {
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
-    "oob", "stealth", "vault", "vuln", "content", "api_enum",
+    "oob", "stealth", "vault", "vuln", "content", "api_enum", "auth_contexts", "auth_resource_policies", "request_restrictions",
 }
 
 #: Faza 2 — stealth qatının strateji variantları.
@@ -59,10 +59,10 @@ BLOCK_403_STRATEGIES = {"backoff", "rotate", "escalate_bypass"}
 
 #: Proqramın istifadəsini qadağan edə biləcəyi hərəkətlər.
 #: `state_changing` — state dəyişən HTTP metodları (POST/PUT/PATCH/DELETE);
-#: default olaraq qadağandır və yalnız `--allow-state-changing` ilə açılır.
+#: YAML qadağan etmədikdə əlavə CLI təsdiqi tələb edilmir.
 ALL_ACTIONS = {
     "active_fuzz", "intrusive_templates", "bypass", "cve_poc",
-    "secret_replay", "param_fuzz", "race", "state_changing",
+    "secret_replay", "param_fuzz", "race", "state_changing", "authentication", "destructive", "dos", "data_deletion",
 }
 
 
@@ -234,6 +234,9 @@ class Config:
     program_rules: ProgramRules = field(default_factory=ProgramRules)
     warnings: list[str] = field(default_factory=list)
     _raw: dict = field(default_factory=dict)
+    auth_contexts: list[dict] = field(default_factory=list)
+    request_restrictions: list[dict] = field(default_factory=list)
+    auth_resource_policies: list[dict] = field(default_factory=list)
 
     # ---------------- yükləmə + validasiya ----------------
     @classmethod
@@ -312,9 +315,54 @@ class Config:
             aggressiveness=aggressiveness, rotation=rotation,
             block_strategy=block_strategy, chain=chain, oob=oob,
             stealth=stealth, vault=vault, vuln=vuln, content=content,
-            api_enum=api_enum,
+            api_enum=api_enum, auth_contexts=cls._validate_auth_contexts(raw.get("auth_contexts")),
+            auth_resource_policies=cls._validate_resource_policies(raw.get("auth_resource_policies")),
             program_rules=program_rules, warnings=warnings, _raw=raw,
+            request_restrictions=cls._validate_request_restrictions(raw.get("request_restrictions", []), warnings),
         )
+
+    @classmethod
+    def _validate_request_restrictions(cls, value, warnings):
+        if not isinstance(value, list):
+            raise ConfigError("request_restrictions must be a list")
+        result = []
+        for rule in value:
+            if not isinstance(rule, dict) or set(rule) != {"hosts", "paths", "methods", "forbidden"}:
+                raise ConfigError("request restriction requires hosts, paths, methods, forbidden")
+            if any(not isinstance(v, list) or not v or any(not isinstance(x, str) or not x for x in v)
+                   for v in rule.values()):
+                raise ConfigError("request restriction fields must be nonempty string lists")
+            if any(not p.startswith("/") for p in rule["paths"]):
+                raise ConfigError("request restriction paths must start with /")
+            methods = [m.upper() for m in rule["methods"]]
+            if set(methods) - {"*", "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE", "TRACE", "CONNECT"}:
+                raise ConfigError("unsupported restriction method")
+            parsed = cls._validate_program_rules({"forbidden": [a for a in rule["forbidden"] if a != "*"]})
+            if parsed.unknown_forbidden:
+                warnings.append("unknown request restriction actions: " + ", ".join(sorted(parsed.unknown_forbidden)))
+            result.append({**rule, "methods": methods,
+                           "forbidden": sorted(parsed.forbidden | ({"*"} if "*" in rule["forbidden"] else set()))})
+        return result
+
+    @staticmethod
+    def _validate_auth_contexts(value):
+        if value is None:
+            return []
+        from .brain.auth_config import validate_contexts
+        try:
+            return validate_contexts(value)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+
+    @staticmethod
+    def _validate_resource_policies(value):
+        if value is None:
+            return []
+        from .brain.resource_policy import validate_policies
+        try:
+            return validate_policies(value)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError('invalid_auth_resource_policies:' + type(exc).__name__) from None
 
     @staticmethod
     def _resolve_profile(aggressiveness: str) -> dict:

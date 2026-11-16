@@ -26,7 +26,7 @@ class TestResult:
     __test__ = False
     status: str
     reason: str
-    evidence: list[dict] = field(default_factory=list)
+    evidence: list[dict] = field(default_factory=list, repr=False)
     confirmed: bool = False
 
 

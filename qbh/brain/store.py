@@ -3,7 +3,7 @@ from dataclasses import asdict
 from qbh import db
 from qbh.ingest.har_importer import canonical
 
-TERMINAL = {'completed', 'candidate', 'inconclusive', 'failed'}
+TERMINAL = {'completed', 'candidate', 'confirmed', 'inconclusive', 'failed'}
 
 
 def get(plan_id, scan_id):
@@ -47,6 +47,9 @@ def transition(plan_id, scan_id, status, reason, *, result_enc=None, finding_id=
         row = get(plan_id, scan_id)
         if row is None:
             raise ValueError('plan_not_in_scan')
+        if result_enc is not None:
+            conn.execute('INSERT INTO test_plan_results(plan_id,result_enc,created_at) VALUES(?,?,?)',
+                         (plan_id, result_enc, db._now()))
         if row['user_decision'] == 'rejected' and status != 'rejected':
             return row
         conn.execute('UPDATE test_plans SET status=?,reason=?,result_enc=COALESCE(?,result_enc),'

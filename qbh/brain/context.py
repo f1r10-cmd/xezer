@@ -31,6 +31,7 @@ class TestContext:
     evidence_refs: list[str] = field(default_factory=list)
     classifications: list = field(default_factory=list)
     url_id: int | None = None
+    resource_policies: list = field(default_factory=list, repr=False)
 
     @property
     def prerequisite_hash(self):
@@ -38,7 +39,8 @@ class TestContext:
         return digest({'prerequisites': self.prerequisites,
                        'auth': [(getattr(a, 'name', ''), getattr(a, 'session_id', '')) for a in self.auth_states],
                        'request': self.request, 'response': self.response,
-                       'schemas': self.api_schemas, 'fingerprint': self.fingerprint})
+                       'schemas': self.api_schemas, 'fingerprint': self.fingerprint,
+                       'resource_policies': self.resource_policies})
 
     def explanation(self):
         return {'request_id': self.request_id, 'evidence_refs': self.evidence_refs,
@@ -72,6 +74,21 @@ class ContextBuilder:
         context = TestContext(self.scan_id, request_id, request, response or {}, self.runtime,
                               auth_states=list(self.auth_states))
         context.url_id = url_id
+        from qbh.scope import ScopeError
+        from .resource_policy import matching_policies
+        context.resource_policies = matching_policies(
+            getattr(getattr(self.runtime, 'cfg', None), 'auth_resource_policies', []), request['url'])
+        context.evidence_refs += [f'config:auth_resource_policies:{p["id"]}' for p in context.resource_policies]
+        provider = getattr(self.runtime, 'auth_state', None)
+        if provider is not None:
+            compatible = []
+            for identity in context.auth_states:
+                try:
+                    provider.headers_for(identity, request['url'])
+                    compatible.append(identity)
+                except (ValueError, ScopeError) as exc:
+                    context.prerequisites['auth_unavailable:' + identity.name] = type(exc).__name__
+            context.auth_states = compatible
         context.endpoint = urlintel.analyze_row({'url': request['url'], 'source': 'brain_context'})
         host_row = conn.execute('SELECT * FROM hosts WHERE scan_id=? AND subdomain=?',
                                 (self.scan_id, host)).fetchone()

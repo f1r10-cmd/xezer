@@ -44,6 +44,16 @@ class Context:
     _stealth: Any = None
     _vault: Any = None
     _scan_session: Any = None
+    auth_state: Any = None
+
+    async def initialize_auth(self):
+        """Only execution paths call this; inspection remains offline."""
+        if not getattr(self.cfg, 'auth_contexts', []):
+            return
+        if self.auth_state is None:
+            from .brain.auth_state import AuthStateMachine
+            self.auth_state = AuthStateMachine(self)
+        await self.auth_state.initialize()
 
     def _auth(self):
         """Authorization yoxdursa konfiqdən təmin edir (fail-closed)."""
@@ -51,6 +61,9 @@ class Context:
             from .authorization import from_config
 
             self.authorization = from_config(self.cfg, self.scan_id)
+        policy = getattr(self.guardian, "policy", None)
+        if policy is not None:
+            policy.authorization = self.authorization
         return self.authorization
 
     @property

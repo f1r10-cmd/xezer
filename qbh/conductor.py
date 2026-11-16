@@ -243,6 +243,8 @@ class Conductor:
             allow_state_changing=bool(
                 getattr(args, "allow_state_changing", False)))
 
+        self.policy.authorization = self.authorization
+
         self.scan_id: int | None = None
         #: Faza 2 (§4.2): davamlı saxlama adapteri (`recovery.DurableStore`) —
         #: skan başlayanda qoşulur. Bərpa planı `--resume` zamanı saxlanılır.

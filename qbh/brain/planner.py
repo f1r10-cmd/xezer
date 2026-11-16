@@ -29,7 +29,7 @@ class BrainPlanner:
     def _authorize(self, context, name):
         auth = self.runtime._auth()
         auth.ensure_active()
-        auth.authorize_url(context.request['url'])
+        auth.authorize_request(context.request.get('method', 'GET'), context.request['url'], name)
         for action in self.knowledge.get(name, {}).get('required_authorization', [name, 'active_fuzz']):
             auth.require(action)
 
@@ -119,16 +119,21 @@ class BrainPlanner:
             # Raw exception strings may contain URLs, cookies, or provider credentials.
             store.transition(plan_id, context.scan_id, 'failed', 'strategy_error:' + type(exc).__name__)
             return {'status': 'failed'}
+        from .strategies.idor import has_confirmation
+        confirmed = plan.vuln_class == 'idor' and has_confirmation(result)
+        if result.status == 'confirmed' and not confirmed:
+            result.status, result.reason, result.confirmed = 'inconclusive', 'confirmation_evidence_incomplete', False
         encrypted = self.runtime.vault.encrypt(canonical(asdict(result)))
         if encrypted is None:
             store.transition(plan_id, context.scan_id, 'failed', 'vault_write_failed_retryable')
             return {'status': 'failed'}
         finding_id = None
-        if result.status == 'candidate':
+        if result.status == 'candidate' or confirmed:
             host_id = db.upsert_host(urlsplit(context.request['url']).hostname, scan_id=context.scan_id)
-            finding_id = db.insert_finding(host_id, 'brain:' + plan.vuln_class, 'low',
-                                          'Verification required: ' + plan.vuln_class,
-                                          evidence='test_plan:' + plan_id, status='candidate', confidence=.4,
+            finding_id = db.insert_finding(host_id, 'brain:' + plan.vuln_class, 'high' if confirmed else 'low',
+                                          ('Verified: ' if confirmed else 'Verification required: ') + plan.vuln_class,
+                                          evidence='test_plan:' + plan_id, status='confirmed' if confirmed else 'candidate',
+                                          confidence=.95 if confirmed else .4,
                                           source='brain_strategy', scan_id=context.scan_id)
             db.add_evidence(finding_id, 'brain_plan', canonical({'plan_id': plan_id, 'evidence_refs': current.evidence_refs}),
                             context.scan_id)
@@ -171,6 +176,9 @@ class BrainPlanner:
         result = EngineResult(stage='brain')
         if db.get_scan(self.scan_id) is None:
             return result.skip('brain: scan_id yoxdur')
+        initialize = getattr(self.runtime, 'initialize_auth', None)
+        if initialize is not None:
+            await initialize()
         self.prepare_scan()
         snapshot = await self.execute_ready(budget=budget)
         rows = store.list_plans(self.scan_id)

@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-state-changing", dest="allow_state_changing",
                    action="store_true", default=False,
                    help="state dəyişən HTTP metodlarına (POST/PUT/PATCH/DELETE) "
-                        "icazə ver — default OFF; proqram RoE-si həmişə qalib gəlir")
+                        "uyğunluq flag-i; icazəni YAML təyin edir, əlavə təsdiq tələb edilmir")
     p.add_argument("--race-fixture", default=None,
                    help="race testi üçün YALNIZ lokal loopback fixture URL-i")
     p.add_argument("--race-count", type=int, default=10,
@@ -156,6 +156,8 @@ async def run(args: argparse.Namespace) -> int:
                 selected = [r['id'] for r in rows] if choice == '*' and args.approve else [choice]
                 for plan_id in selected:
                     store.decide(plan_id, sid, approve=bool(args.approve), reason=redact(args.reason))
+                if args.approve:
+                    await conductor.ctx.initialize_auth()
                 planner.prepare_scan()
                 if args.approve:
                     await planner.execute_ready()

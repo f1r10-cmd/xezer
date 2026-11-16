@@ -25,7 +25,7 @@ DB_PATH = os.environ.get("QBH_DB_PATH", "findings.db")
 #:  * v6 → secret vault (`secrets.value_enc`).
 #:  * v7 (Faza 2, §4) → davamlı icra/bərpa cədvəlləri: `task_state`,
 #:    `event_state`, `followup_queue`. Əlavə (additive) — mövcud data qorunur.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 #: Davamlı tapşırıq vəziyyətləri (`task_state.status`) — `tasks.LIFECYCLE` ilə
 #: eyni dəstdir. `db` `tasks`-dan asılı olmasın deyə burada KİMLİK şəkildə
@@ -103,6 +103,21 @@ CREATE TABLE IF NOT EXISTS scans (
   program TEXT, mode TEXT, started_at TEXT, finished_at TEXT,
   status TEXT DEFAULT 'running'
 );
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+  context_name TEXT NOT NULL, payload_enc BLOB NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_contexts (
+  scan_id INTEGER NOT NULL REFERENCES scans(id), name TEXT NOT NULL, role TEXT NOT NULL,
+  session_id TEXT REFERENCES auth_sessions(id), origin TEXT NOT NULL,
+  status TEXT NOT NULL, valid_until TEXT, provenance TEXT NOT NULL, config_digest TEXT NOT NULL,
+  PRIMARY KEY(scan_id,name)
+);
+CREATE TABLE IF NOT EXISTS auth_context_events (
+  id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id), context_name TEXT NOT NULL,
+  status TEXT NOT NULL, reason TEXT NOT NULL, evidence_enc BLOB, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_events_scan ON auth_context_events(scan_id,context_name,id);
 CREATE TABLE IF NOT EXISTS test_plans (
   id TEXT PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
   request_id INTEGER REFERENCES imported_requests(id), url_id INTEGER REFERENCES urls(id),
@@ -114,6 +129,15 @@ CREATE TABLE IF NOT EXISTS test_plans (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plans_scan_status ON test_plans(scan_id,status);
+CREATE TABLE IF NOT EXISTS test_plan_results (
+  id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
+  result_enc BLOB NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_results_plan ON test_plan_results(plan_id);
+INSERT INTO test_plan_results(plan_id,result_enc,created_at)
+SELECT p.id,p.result_enc,p.updated_at FROM test_plans p
+WHERE p.result_enc IS NOT NULL AND NOT EXISTS
+(SELECT 1 FROM test_plan_results r WHERE r.plan_id=p.id);
 CREATE TABLE IF NOT EXISTS test_plan_events (
   id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
   status TEXT NOT NULL, reason TEXT NOT NULL, prerequisite_hash TEXT NOT NULL,

@@ -41,7 +41,8 @@ async def test_idor_does_not_infer_access_from_identifier():
     context = TestContext(1, 1, {'url': 'https://example.invalid/api/users/123'})
     strategy = discover()['idor']
     plan = strategy.plan_test(context)
-    assert {'ownership_evidence', 'protected_resource', 'two_distinct_identities'} <= set(plan.missing_prerequisites)
+    assert 'two_distinct_identities' in plan.missing_prerequisites
+    # Ownership is now a confirmation requirement; it does not prevent bounded probes.
     result = await strategy.execute_test(context, plan)
     assert result.status == 'deferred' and not result.confirmed
 

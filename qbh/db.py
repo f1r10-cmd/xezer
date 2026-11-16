@@ -25,7 +25,7 @@ DB_PATH = os.environ.get("QBH_DB_PATH", "findings.db")
 #:  * v6 → secret vault (`secrets.value_enc`).
 #:  * v7 (Faza 2, §4) → davamlı icra/bərpa cədvəlləri: `task_state`,
 #:    `event_state`, `followup_queue`. Əlavə (additive) — mövcud data qorunur.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Davamlı tapşırıq vəziyyətləri (`task_state.status`) — `tasks.LIFECYCLE` ilə
 #: eyni dəstdir. `db` `tasks`-dan asılı olmasın deyə burada KİMLİK şəkildə
@@ -103,6 +103,37 @@ CREATE TABLE IF NOT EXISTS scans (
   program TEXT, mode TEXT, started_at TEXT, finished_at TEXT,
   status TEXT DEFAULT 'running'
 );
+CREATE TABLE IF NOT EXISTS imported_requests (
+  id INTEGER PRIMARY KEY,
+  scan_id INTEGER NOT NULL REFERENCES scans(id),
+  source TEXT NOT NULL DEFAULT 'har_import',
+  method TEXT NOT NULL, url TEXT NOT NULL, host TEXT NOT NULL, path TEXT NOT NULL,
+  query_params TEXT NOT NULL, headers TEXT NOT NULL,
+  request_body BLOB NOT NULL, response_status INTEGER NOT NULL,
+  response_headers TEXT NOT NULL, response_body BLOB NOT NULL,
+  started_at TEXT, time_ms REAL, sequence_order INTEGER NOT NULL,
+  dedup_identity TEXT NOT NULL, provenance TEXT NOT NULL,
+  UNIQUE(scan_id, dedup_identity)
+);
+CREATE TABLE IF NOT EXISTS import_entries (
+  id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+  source_digest TEXT NOT NULL, sequence_order INTEGER NOT NULL,
+  request_id INTEGER REFERENCES imported_requests(id),
+  status TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+  evidence_enc BLOB
+);
+CREATE TABLE IF NOT EXISTS request_graph_edges (
+  from_request_id INTEGER NOT NULL REFERENCES imported_requests(id),
+  to_request_id INTEGER NOT NULL REFERENCES imported_requests(id),
+  relation_type TEXT NOT NULL CHECK(relation_type IN
+    ('session_continuation','auth_flow','same_endpoint_family','parameter_progression','unknown')),
+  confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  provenance TEXT NOT NULL CHECK(length(provenance)>0), created_at TEXT NOT NULL,
+  CHECK(from_request_id != to_request_id),
+  PRIMARY KEY(from_request_id,to_request_id,relation_type)
+);
+CREATE INDEX IF NOT EXISTS idx_imported_scan_host ON imported_requests(scan_id,host);
+CREATE INDEX IF NOT EXISTS idx_graph_to ON request_graph_edges(to_request_id);
 CREATE TABLE IF NOT EXISTS hosts (
   id INTEGER PRIMARY KEY,
   scan_id INTEGER NOT NULL DEFAULT 0,

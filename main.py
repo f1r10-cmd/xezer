@@ -90,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="gözləyən davam testlərini (followup_queue) göstər")
     p.add_argument("--scan-id", dest="scan_id", type=int, default=None,
                    help="əməliyyatı konkret skana tətbiq et")
+    p.add_argument("--import-har", help="HAR faylını offline idxal et")
+    p.add_argument("--list-imported", action="store_true")
+    p.add_argument("--request-graph", action="store_true")
     return p
 
 
@@ -123,6 +126,32 @@ def _show_pending_followups(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if any(getattr(args, flag, False) for flag in ("import_har", "list_imported", "request_graph")):
+        import json
+        from qbh import db
+        from qbh.ingest.har_importer import HarImporter, list_imported
+        from qbh.ingest.request_graph import RequestGraph
+        from qbh.vault import SecretVault
+        db.init_db()
+        if args.import_har:
+            cfg = Config.load(args.config)
+            vault = SecretVault.from_config(cfg)
+            try:
+                result = HarImporter(vault).import_file(args.import_har, args.scan_id)
+                if vault.available:
+                    RequestGraph(result['scan_id'], vault).infer()
+            except (ValueError, KeyError, TypeError):
+                print("[!] HAR formatı və ya skan identifikatoru etibarsızdır")
+                return EXIT_USAGE
+            print(json.dumps(result, ensure_ascii=False))
+            return EXIT_FAILURE if result['blocked'] or result['invalid'] else EXIT_OK
+        nodes = list_imported(args.scan_id)
+        if args.request_graph:
+            scans = sorted({n['scan_id'] for n in nodes})
+            print(json.dumps({'nodes': nodes, 'edges': [e for sid in scans for e in RequestGraph(sid).edges()]}, ensure_ascii=False))
+        else:
+            print(json.dumps(nodes, ensure_ascii=False))
+        return EXIT_OK
     # Faza 2: davam-testləri sorğusu skan konfiqurasiyası olmadan da işləyir.
     if getattr(args, "pending_followups", False):
         return _show_pending_followups(args)

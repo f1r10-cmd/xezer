@@ -40,7 +40,12 @@ class TestContext:
                        'auth': [(getattr(a, 'name', ''), getattr(a, 'session_id', '')) for a in self.auth_states],
                        'request': self.request, 'response': self.response,
                        'schemas': self.api_schemas, 'fingerprint': self.fingerprint,
-                       'resource_policies': self.resource_policies})
+                       'resource_policies': self.resource_policies,
+                       'related_requests': [getattr(n, 'request_id', None) for n in self.related_requests],
+                       'findings': [(f['id'], f['status']) for f in self.previous_findings
+                                    if not f['module'].startswith('brain:')
+                                    and any(self.request['url'] in str(f.get(key, ''))
+                                            for key in ('evidence', 'description', 'curl_repro'))]})
 
     def explanation(self):
         return {'request_id': self.request_id, 'evidence_refs': self.evidence_refs,

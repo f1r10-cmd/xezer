@@ -18,6 +18,7 @@ import yaml
 from .scope import ScopeEnforcer, ScopeError, normalize_host
 
 KNOWN_TOP_KEYS = {
+    "max_reconsideration_rounds",
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
     "oob", "stealth", "vault", "vuln", "content", "api_enum", "auth_contexts", "auth_resource_policies", "request_restrictions",
@@ -236,6 +237,7 @@ class Config:
     _raw: dict = field(default_factory=dict)
     auth_contexts: list[dict] = field(default_factory=list)
     request_restrictions: list[dict] = field(default_factory=list)
+    max_reconsideration_rounds: int = 3
     auth_resource_policies: list[dict] = field(default_factory=list)
 
     # ---------------- yükləmə + validasiya ----------------
@@ -309,7 +311,11 @@ class Config:
         content = cls._validate_content(raw.get("content"), warnings)
         api_enum = cls._validate_api_enum(raw.get("api_enum"), warnings)
 
+        rounds = raw.get("max_reconsideration_rounds", 3)
+        if type(rounds) is not int or not 0 <= rounds <= 100:
+            raise ConfigError("max_reconsideration_rounds must be an integer between 0 and 100")
         return cls(
+            max_reconsideration_rounds=rounds,
             path=path, program=program, nvd_api_key=nvd_key, scope=scope,
             limits=limits, proxy_file=proxy_file, interface=interface,
             aggressiveness=aggressiveness, rotation=rotation,

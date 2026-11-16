@@ -40,6 +40,8 @@ from .tasks import STATE_COMPLETED, task_identity
 
 #: Trigger → avtomatik davam hərəkətləri.
 TRIGGERS: dict[str, list[str]] = {
+    "auth_context_added": ["brain_reconsider"],
+    "har_import_completed": ["brain_reconsider"],
     "subdomain": ["live_check", "fingerprint", "js_analysis"],
     "js_file": ["extract_endpoints", "extract_secrets", "test_secret_endpoints",
                 "secret_replay"],
@@ -62,6 +64,7 @@ TRIGGERS: dict[str, list[str]] = {
 #: Hərəkətlər → icra anatomiyası: "local" (bu modul icra edir) /
 #: "delegated" (Conductor-un artıq planlaşdırdığı mərhələ).
 ACTION_EXEC = {
+    "brain_reconsider": "local",
     "live_check": "delegated", "fingerprint": "delegated",
     "js_analysis": "delegated", "extract_endpoints": "delegated",
     "extract_secrets": "delegated", "test_secret_endpoints": "local",

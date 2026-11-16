@@ -182,6 +182,16 @@ async def run(args: argparse.Namespace) -> int:
                 result = HarImporter(vault).import_file(args.import_har, args.scan_id)
                 if vault.available:
                     RequestGraph(result['scan_id'], vault).infer()
+                    from qbh.context import Context
+                    from qbh.brain.planner import BrainPlanner
+                    runtime = Context(cfg, args, None, scan_id=result['scan_id'])
+                    runtime._vault = vault
+                    await runtime.initialize_auth(offline=True)
+                    from qbh.adaptive import note_evidence
+                    from qbh.ingest.har_importer import digest
+                    note_evidence(runtime, 'har_import_completed', digest(
+                        [entry.get('request_id') for entry in result['entries']]))
+                    result['feedback_plans'] = len(BrainPlanner(runtime).prepare_scan())
             except (ValueError, KeyError, TypeError):
                 print("[!] HAR formatı və ya skan identifikatoru etibarsızdır")
                 return EXIT_USAGE

@@ -304,6 +304,8 @@ class AuthStateMachine:
             context.identity_verified = verified
             context.subject_digest = digest(subject) if subject is not None else ''
             self._event(context, 'authenticated', 'identity_verified' if verified else 'login_observed_identity_unverified', evidence)
+            from qbh.adaptive import note_evidence
+            note_evidence(self.runtime, 'auth_context_added', 'auth_session:' + reference)
             return True
         except (ValueError, ScopeError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             # Credential-bearing provider exceptions are not logged or persisted verbatim.

@@ -143,11 +143,50 @@ class AdaptiveController:
         #: terminal statusla yenilənir.
         self.store = store
 
+    def reconsider_plan(self, plan_id, previous, prerequisite_hash, *, scan_id, maximum=3, events=None, ready=False):
+        """A changed evidence version is necessary; persisted rounds survive restart."""
+        from . import db
+        from .tasks import EventLedger
+        if previous is None:
+            return True, "initial_prerequisites"
+        if previous['user_decision'] == 'rejected':
+            return False, "user_rejected"
+        conn = db.get_db()
+        saved = conn.execute(
+            'SELECT permitted,reason FROM plan_reconsiderations WHERE plan_id=? AND prerequisite_hash=?',
+            (plan_id, prerequisite_hash)).fetchone()
+        if saved:
+            return bool(saved['permitted']), saved['reason']
+        if previous['prerequisite_hash'] == prerequisite_hash:
+            return True, "unchanged_prerequisites"
+        count = conn.execute('SELECT count(*) FROM plan_reconsiderations WHERE plan_id=? AND permitted=1',
+                             (plan_id,)).fetchone()[0]
+        permitted = count < maximum
+        reason = "prerequisites_changed" if permitted else "max_reconsideration_rounds_reached"
+        with conn:
+            conn.execute('INSERT INTO plan_reconsiderations(plan_id,prerequisite_hash,round,reason,permitted,created_at) '
+                         'VALUES(?,?,?,?,?,?)', (plan_id, prerequisite_hash, count + 1, reason, int(permitted), db._now()))
+        if events is None:
+            from .recovery import DurableStore, event_records
+            events = EventLedger(store=DurableStore(scan_id))
+            events.restore(event_records(scan_id))
+        events.accept('prerequisites_changed', str(scan_id) + ':' + plan_id + ':' + prerequisite_hash)
+        if permitted and ready:
+            from .tasks import task_identity
+            task_id = task_identity(scan_id, 'brain:' + previous['vuln_class'], plan_id,
+                                    profile=prerequisite_hash)
+            self._persist_followup(task_id, ('brain:' + previous['vuln_class'],), status="pending")
+        self.decisions.append({"identity": plan_id, "reason": reason, "round": count + 1, "proceed": permitted})
+        return permitted, reason
+
     # ------------------------------------------------------------------ decide
     def evaluate(self, signal: Signal, *, identity: str,
                  actions: tuple = ()) -> FollowUp:
         """Siqnala əsaslanaraq davam testi planlaşdırılsınmı (səbəblə)."""
         self.stats.signals += 1
+        if signal.kind in {"auth_context_added", "har_import_completed", "finding_added"}:
+            actions = tuple(actions) or ("brain_reconsider",)
+
         if signal.strength == STRENGTH_NONE:
             self.stats.none += 1
             self.stats.skipped_no_signal += 1
@@ -283,3 +322,17 @@ class AdaptiveController:
 
     def snapshot(self) -> dict:
         return self.stats.to_dict()
+
+
+def note_evidence(runtime, kind, reference):
+    """Record an evidence event without dispatching traffic (including offline imports)."""
+    from .recovery import DurableStore, event_records
+    from .tasks import EventLedger
+    if kind not in {'auth_context_added', 'har_import_completed', 'finding_added'}:
+        raise ValueError('unsupported_evidence_event')
+    ledger = getattr(runtime, 'event_ledger', None)
+    if ledger is None:
+        ledger = EventLedger(store=DurableStore(runtime.scan_id))
+        ledger.restore(event_records(runtime.scan_id))
+        runtime.event_ledger = ledger
+    return ledger.accept(kind, str(reference))

@@ -25,6 +25,14 @@ class BrainPlanner:
         self.ledger = getattr(runtime, 'task_ledger', None) or TaskLedger()
         self.scan_id = db.effective_scan_id(runtime.scan_id)
         self._prepared = {}
+        from qbh.adaptive import AdaptiveController
+        from qbh.recovery import DurableStore, task_records
+        durable = DurableStore(self.scan_id)
+        if self.ledger.store is None:
+            self.ledger.store = durable
+            self.ledger.restore(task_records(self.scan_id))
+        self.adaptive = getattr(runtime, 'adaptive', None) or AdaptiveController(ledger=self.ledger, store=durable)
+
 
     def _authorize(self, context, name):
         auth = self.runtime._auth()
@@ -60,6 +68,14 @@ class BrainPlanner:
                 status, reason = 'deferred', 'vault_evidence_unavailable_retryable'
             if status == 'ready' and not self.runtime.vault.available:
                 status, reason = 'deferred', 'vault_unavailable_retryable'
+            previous = store.get(identity, context.scan_id)
+            if previous is not None and previous['status'] not in {'confirmed', 'completed'}:
+                permitted, feedback_reason = self.adaptive.reconsider_plan(
+                    identity, previous, plan.prerequisite_hash, scan_id=context.scan_id,
+                    maximum=self.runtime.cfg.max_reconsideration_rounds,
+                    events=getattr(self.runtime, 'event_ledger', None), ready=status == 'ready')
+                if not permitted and status != 'skipped':
+                    status, reason = 'deferred', feedback_reason
             row = store.save(identity, context, plan, status, reason)
             self._prepared[identity] = (context, plan)
             records.append(row)
@@ -146,6 +162,7 @@ class BrainPlanner:
         sched = Scheduler(workers=cap, global_limit=cap, per_host_limit=cap, ledger=self.ledger,
                           metrics=getattr(self.runtime, 'orchestration', None), guardian=self.runtime.guardian)
         admitted = 0
+        dispatched = []
         async with sched:
             for plan_id, (context, plan) in self._prepared.items():
                 row = store.get(plan_id, context.scan_id)
@@ -166,10 +183,16 @@ class BrainPlanner:
                                  run=lambda pid=plan_id, ctx=context, p=plan: self._execute(pid, ctx, p))
                 if await submit_with_backpressure(sched, task):
                     admitted += 1
+                    dispatched.append((ident, plan_id))
                 else:
                     self.ledger.mark(ident, STATE_SKIPPED, 'bounded_backpressure')
                     store.transition(plan_id, context.scan_id, 'deferred', 'bounded_backpressure')
             await sched.drain()
+        for ident, plan_id in dispatched:
+            row = store.get(plan_id, self.scan_id)
+            outcome = {'confirmed': 'validated', 'failed': 'failed', 'completed': 'completed'}.get(
+                row['status'], 'inconclusive')
+            self.adaptive.record_outcome(ident, outcome, note='test_plan:' + plan_id)
         return sched.snapshot()
 
     async def run(self, *, budget=None):

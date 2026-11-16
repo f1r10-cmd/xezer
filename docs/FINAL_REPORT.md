@@ -1,5 +1,7 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated-section:v1:29093ca580793d8ce0e70201857399c18c0e92929b52142da31901fcdadb1912 -->
+
 <!-- coderabbit-ai-generated-section:v1:be59253f4e347fd46507ead7d05e6cf7811ae07d4d64fe345b7ef18a4cb4800c -->
 
 # XEzer — Fazalar 3–8 yekun yoxlama hesabatı
@@ -7,7 +9,8 @@
 ## Ümumi qərar: PARTIAL — v4.0.0 buraxılmayıb
 
 16 noyabr 2026. Fazalar 3–8 ardıcıllıqla implementasiya və regressiya yoxlamasından
-keçib. Son lokal dəst **1280 passed**, **85.33% coverage**; benchmark qorunub.
+keçib. Son lokal full dəst **1280 passed**, **85.33% coverage**; son kod
+commit-i GitHub-da hər Python versiyasında **1283 passed** verib; benchmark qorunub.
 Buna baxmayaraq production-ready/feature-complete iddiası verilmir: external
 CLI-lərin daxili path/method/technique sorğularını və cooldown davranışını mövcud
 native HTTP sərhədi idarə etmir. Bu, Non-Negotiable §1.2/§1.7/§1.9 üçün açıq
@@ -164,13 +167,37 @@ Release-hardening commit `26145d78bdb9ab396bfd2229dad3146fc81bd169` üçün
 Sonrakı native alias düzəlişi (`js`/`jsanalysis`, `param`/`param_enum`) üçün
 146 məqsədli authorization/HTTP/Conductor/Chain/Brain/E2E testi **7.85s**-də keçib;
 compile və ruff PASS. Əvvəlki full suite-in dəyişməyən hissələri reused.
-Bu əlavə üç regressiya testi əvvəlki 1280 full sayına daxil deyil. Yeni matrix:
+Bu əlavə üç regressiya testi əvvəlki 1280 lokal full sayına daxil deyil.
+
+Son kod commit-i `41b187eec759d335270883e48fd50fa48fbd476d` üçün
+[GitHub CI 43836511230](https://github.com/f1r10-cmd/xezer/actions/runs/43836511230)
+**completed/success**, bütün **8 job** keçib. CI log-dan çıxarılmış son full nəticələr:
+
+| Python | Test | Müddət | Coverage |
+|---|---:|---:|---:|
+| 3.10 | 1283 passed | 87.80s | 85.36% |
+| 3.11 | 1283 passed | 88.67s | 85.24% |
+| 3.12 | 1283 passed | 88.41s | 85.36% |
+| 3.13 | 1283 passed | 90.98s | 85.36% |
+| 3.14 | 1283 passed | 81.18s | 85.33% |
+
+Aşağıdakı ayrıca security reproducer pytest dəstinə daxil deyil və release gate-i
+FAIL göstərir; yaşıl CI həmin məlum boşluğu aradan qaldırmış sayılmır. Yeni matrix:
 Python 3.10/3.11/3.12/3.13/3.14, compile, coverage≥70%, iki benchmark, ruff,
 gitleaks və loopback smoke. `main`-ə merge istifadəçiyə saxlanır.
 
 ## Qalan maneə və tələb olunan qərar
 
-1. External tool-lar üçün request-aware enforcement tələb olunur. Mövcud
+1. **Ayrıca runtime security gate: FAIL.** Son kod commit-i üzərində real loopback
+   server və `EgressController.run()` vasitəsilə real Python subprocess yoxlanıb.
+   `/restricted` üçün GET `forbidden: ["*"]` olduğu halda
+   `Authorization.authorize_request()` sorğunu blokladı; subprocess isə exit 0
+   verdi və server **1 sorğu** aldı. Nəticə: `native_blocked=true`,
+   `external_blocked=false`, `loopback_requests_received=1`. Reproducer exit 0
+   boşluğun təkrarlandığını göstərir, security gate-in keçdiyini göstərmir.
+   Heç bir kənar host və dağıdıcı əməliyyat istifadə edilməyib.
+
+   External tool-lar üçün request-aware enforcement tələb olunur. Mövcud
    `EgressController.prepare_process` tool/target/DNS yoxlayır, binary-nin daxili
    HTTPS əməliyyatlarını idarə etmir. Native testlərin keçməsi bu zəmanəti vermir.
 2. Uyğun mediation olmayan external engine-i path/method məhdudiyyəti olan scope-da

@@ -108,6 +108,7 @@ class _HostState:
     last: float = field(default_factory=time.monotonic)
     blocks: int = 0
     halted_until: float = 0.0
+    rate_limited_until: float = 0.0
 
 
 class HttpPolicy:
@@ -178,7 +179,7 @@ class HttpPolicy:
 
     def _block_strategy(self, status: int) -> str:
         if status == 429:
-            return self.block_429
+            return "respect"
         if status == 403:
             return self.block_403
         return "respect"
@@ -295,9 +296,11 @@ class HttpPolicy:
                 retry_after = parse_retry_after(
                     headers.get("Retry-After") or headers.get("retry-after"))
                 if retry_after > 0:
-                    wait = min(max(wait, retry_after), self.max_cooldown)
+                    wait = max(wait, retry_after)
                     note = f"; Retry-After={retry_after:.0f}s hörmət edildi"
-            st.halted_until = time.monotonic() + wait
+            st.halted_until = max(st.halted_until, time.monotonic() + wait)
+            if status == 429:
+                st.rate_limited_until = st.halted_until
             reason = ("rate-limit (429) alındı" if status == 429
                       else "qadağa (403) alındı")
             ev = BlockEvent(host, status, datetime.now(timezone.utc).isoformat(),
@@ -309,7 +312,8 @@ class HttpPolicy:
                   f"(strategiya: {self._block_strategy(status)})")
         elif 200 <= status < 400:
             st.blocks = 0
-            st.halted_until = 0.0
+            # Preserve active rate limits; retain the existing 403 recovery contract.
+            st.halted_until = st.rate_limited_until if st.rate_limited_until > time.monotonic() else 0.0
 
     def audit(self) -> list[dict]:
         return [e.__dict__ for e in self.block_events]
@@ -328,6 +332,9 @@ class HttpPolicy:
         cache_meta: dict | None = None,
         **kwargs,
     ) -> HttpResponse:
+        authorization = getattr(self, "authorization", None)
+        if authorization is not None:
+            authorization.authorize_request(method, url)
         try:
             host = extract_host(url)
             host = self.scope.authorize(host)
@@ -358,6 +365,8 @@ class HttpPolicy:
         events: list[BlockEvent] = []
 
         while True:
+            if authorization is not None:
+                authorization.authorize_request(method, current)
             attempt_headers = headers
             call_kwargs = dict(kwargs)
             if self.identity_provider is not None:
@@ -394,7 +403,7 @@ class HttpPolicy:
             # ---- blok (403/429) → adaptiv strategiya ----
             # `observe_block=False` (məs. bypass probe): xam status qaytarılır və
             # host cooldown-a salınmır → eyni yol üzrə bypass matrisi sınana bilər.
-            if status in (403, 429) and observe_block:
+            if status == 429 or (status == 403 and observe_block):
                 strategy = self._block_strategy(status)
                 if strategy in ("rotate", "backoff_then_rotate", "escalate_bypass"):
                     if strategy == "backoff_then_rotate":

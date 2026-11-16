@@ -311,3 +311,14 @@ class TestFormatReport:
         assert "xəta: çıxış kodu 1" in out
         assert "tövsiyə: əl ilə quraşdır" in out
         assert "v2.1.0" in out
+
+
+@pytest.mark.parametrize('result', [ProcResult(2), ProcResult(-1, missing=True), ProcResult(124, timed_out=True)])
+async def test_failed_binary_probe_is_not_verified(monkeypatch, result):
+    monkeypatch.setattr(installer.shutil, 'which', lambda name: '/synthetic/' + name)
+    async def fail_probe(*args, **kwargs):
+        return result
+    monkeypatch.setattr(installer, 'run_process', fail_probe)
+    status = await installer._detect_one(_SPEC)
+    assert not status.present and not status.verified
+    assert status.install_status == 'failed' and status.manual_action

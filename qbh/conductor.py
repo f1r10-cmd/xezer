@@ -188,6 +188,9 @@ STAGE_MAP: dict[str, dict] = {
                    "input": "candidate findings", "output": "validated findings",
                    "scope": "global", "subprocess": False, "network": True,
                    "findings": True, "klass": 4},
+    "applicability": {"prereq": ("recon",), "input": "discovered URLs",
+                      "output": "recorded applicability probes", "scope": "url", "subprocess": False,
+                      "network": True, "findings": False, "klass": 1},
     "chain": {"prereq": ("validation",), "input": "bütün DB vəziyyəti",
               "output": "zəncir davam testləri", "scope": "global",
               "subprocess": False, "network": True, "findings": True,
@@ -242,6 +245,8 @@ class Conductor:
             cfg, scan_id=None, canceller=asyncio.Event(),
             allow_state_changing=bool(
                 getattr(args, "allow_state_changing", False)))
+
+        self.policy.authorization = self.authorization
 
         self.scan_id: int | None = None
         #: Faza 2 (§4.2): davamlı saxlama adapteri (`recovery.DurableStore`) —
@@ -380,7 +385,11 @@ class Conductor:
         print(f"\n[▶] {label}")
         t0 = time.monotonic()
         try:
-            result = await factory()
+            if self.authorization.allows(stage):
+                with self.authorization.operation(stage):
+                    result = await factory()
+            else:
+                result = EngineResult(stage=stage).skip("authorization: forbidden engine " + stage)
         except asyncio.CancelledError:
             sr.status = "cancelled"
             sr.completed_at = now_iso()
@@ -594,6 +603,7 @@ class Conductor:
     async def run_vuln(self) -> None:
         await self._ensure_tools()
 
+        await self._run_stage("applicability", "", self._probe_applicability)
         fp = FingerprintEngine(self.ctx)
         await self._run_stage("fingerprint", "", lambda: fp.run())
 
@@ -655,12 +665,27 @@ class Conductor:
         await self._run_stage("sourcecode", "",
                               lambda: SourceCodeEngine(self.ctx).run())
 
+    async def _probe_applicability(self):
+        from .urlintel import probe_applicability
+        result = await probe_applicability(self.ctx)
+        self._merge_scheduler_totals(result.data.get("scheduler", {}))
+        return result
+
     async def _run_chain(self):
         from .chain import ChainPipeline
 
+        probe = await self._probe_applicability()
         pipeline = ChainPipeline(self.ctx)
         self.chain = pipeline
-        return await pipeline.run()
+        result = await pipeline.run()
+        if isinstance(result, EngineResult):
+            result.data["applicability"] = probe.data
+            if probe.partial:
+                result.mark_partial("applicability probes remain deferred")
+        snapshot = result.data.get("brain", {}).get("scheduler") if isinstance(result, EngineResult) else None
+        if snapshot:
+            self._merge_scheduler_totals(snapshot)
+        return result
 
     # ---------------- yekun ----------------
     def generate_report(self) -> str | None:

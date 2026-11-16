@@ -25,7 +25,7 @@ DB_PATH = os.environ.get("QBH_DB_PATH", "findings.db")
 #:  * v6 → secret vault (`secrets.value_enc`).
 #:  * v7 (Faza 2, §4) → davamlı icra/bərpa cədvəlləri: `task_state`,
 #:    `event_state`, `followup_queue`. Əlavə (additive) — mövcud data qorunur.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 12
 
 #: Davamlı tapşırıq vəziyyətləri (`task_state.status`) — `tasks.LIFECYCLE` ilə
 #: eyni dəstdir. `db` `tasks`-dan asılı olmasın deyə burada KİMLİK şəkildə
@@ -103,6 +103,90 @@ CREATE TABLE IF NOT EXISTS scans (
   program TEXT, mode TEXT, started_at TEXT, finished_at TEXT,
   status TEXT DEFAULT 'running'
 );
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+  context_name TEXT NOT NULL, payload_enc BLOB NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_contexts (
+  scan_id INTEGER NOT NULL REFERENCES scans(id), name TEXT NOT NULL, role TEXT NOT NULL,
+  session_id TEXT REFERENCES auth_sessions(id), origin TEXT NOT NULL,
+  status TEXT NOT NULL, valid_until TEXT, provenance TEXT NOT NULL, config_digest TEXT NOT NULL,
+  PRIMARY KEY(scan_id,name)
+);
+CREATE TABLE IF NOT EXISTS auth_context_events (
+  id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id), context_name TEXT NOT NULL,
+  status TEXT NOT NULL, reason TEXT NOT NULL, evidence_enc BLOB, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_events_scan ON auth_context_events(scan_id,context_name,id);
+CREATE TABLE IF NOT EXISTS test_plans (
+  id TEXT PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+  request_id INTEGER REFERENCES imported_requests(id), url_id INTEGER REFERENCES urls(id),
+  vuln_class TEXT NOT NULL, prerequisite_hash TEXT NOT NULL,
+  status TEXT NOT NULL, reason TEXT NOT NULL, missing_prerequisites TEXT NOT NULL,
+  evidence_refs TEXT NOT NULL, classifications TEXT NOT NULL,
+  user_decision TEXT NOT NULL DEFAULT 'automatic', decision_reason TEXT NOT NULL DEFAULT '',
+  result_enc BLOB, finding_id INTEGER REFERENCES findings(id),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plans_scan_status ON test_plans(scan_id,status);
+CREATE TABLE IF NOT EXISTS js_observations (
+ id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+ source_digest TEXT NOT NULL, content_digest TEXT NOT NULL, payload_enc BLOB,
+ summary TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_js_observations_scan ON js_observations(scan_id);
+CREATE TABLE IF NOT EXISTS plan_reconsiderations (
+ id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
+ prerequisite_hash TEXT NOT NULL, round INTEGER NOT NULL,
+ reason TEXT NOT NULL, permitted INTEGER NOT NULL, created_at TEXT NOT NULL,
+ UNIQUE(plan_id,prerequisite_hash)
+);
+CREATE TABLE IF NOT EXISTS test_plan_results (
+  id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
+  result_enc BLOB NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_results_plan ON test_plan_results(plan_id);
+INSERT INTO test_plan_results(plan_id,result_enc,created_at)
+SELECT p.id,p.result_enc,p.updated_at FROM test_plans p
+WHERE p.result_enc IS NOT NULL AND NOT EXISTS
+(SELECT 1 FROM test_plan_results r WHERE r.plan_id=p.id);
+CREATE TABLE IF NOT EXISTS test_plan_events (
+  id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
+  status TEXT NOT NULL, reason TEXT NOT NULL, prerequisite_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_events ON test_plan_events(plan_id,id);
+CREATE TABLE IF NOT EXISTS imported_requests (
+  id INTEGER PRIMARY KEY,
+  scan_id INTEGER NOT NULL REFERENCES scans(id),
+  source TEXT NOT NULL DEFAULT 'har_import',
+  method TEXT NOT NULL, url TEXT NOT NULL, host TEXT NOT NULL, path TEXT NOT NULL,
+  query_params TEXT NOT NULL, headers TEXT NOT NULL,
+  request_body BLOB NOT NULL, response_status INTEGER NOT NULL,
+  response_headers TEXT NOT NULL, response_body BLOB NOT NULL,
+  started_at TEXT, time_ms REAL, sequence_order INTEGER NOT NULL,
+  dedup_identity TEXT NOT NULL, provenance TEXT NOT NULL,
+  UNIQUE(scan_id, dedup_identity)
+);
+CREATE TABLE IF NOT EXISTS import_entries (
+  id INTEGER PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+  source_digest TEXT NOT NULL, sequence_order INTEGER NOT NULL,
+  request_id INTEGER REFERENCES imported_requests(id),
+  status TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+  evidence_enc BLOB
+);
+CREATE TABLE IF NOT EXISTS request_graph_edges (
+  from_request_id INTEGER NOT NULL REFERENCES imported_requests(id),
+  to_request_id INTEGER NOT NULL REFERENCES imported_requests(id),
+  relation_type TEXT NOT NULL CHECK(relation_type IN
+    ('session_continuation','auth_flow','same_endpoint_family','parameter_progression','unknown')),
+  confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  provenance TEXT NOT NULL CHECK(length(provenance)>0), created_at TEXT NOT NULL,
+  CHECK(from_request_id != to_request_id),
+  PRIMARY KEY(from_request_id,to_request_id,relation_type)
+);
+CREATE INDEX IF NOT EXISTS idx_imported_scan_host ON imported_requests(scan_id,host);
+CREATE INDEX IF NOT EXISTS idx_graph_to ON request_graph_edges(to_request_id);
 CREATE TABLE IF NOT EXISTS hosts (
   id INTEGER PRIMARY KEY,
   scan_id INTEGER NOT NULL DEFAULT 0,

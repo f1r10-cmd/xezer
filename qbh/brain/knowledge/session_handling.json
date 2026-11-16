@@ -1,0 +1,57 @@
+{
+  "vuln_class": "session_handling",
+  "preconditions": [
+    {
+      "name": "authenticated_session",
+      "required": true
+    },
+    {
+      "name": "session_policy",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "authentication",
+    "account_management"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Compare designated test-session validity against its documented expiry and logout policy."
+  ],
+  "expected_behavior": "Expired or invalidated sessions must not access protected resources.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Protected read succeeds with a session proven invalid under the applicable policy."
+  ],
+  "impact": "Continued unauthorized session access.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD",
+      "POST"
+    ],
+    "data_modification": false,
+    "destructive": false,
+    "owned_test_session_required": true
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "session_handling",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

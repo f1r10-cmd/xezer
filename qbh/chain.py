@@ -40,6 +40,8 @@ from .tasks import STATE_COMPLETED, task_identity
 
 #: Trigger → avtomatik davam hərəkətləri.
 TRIGGERS: dict[str, list[str]] = {
+    "auth_context_added": ["brain_reconsider"],
+    "har_import_completed": ["brain_reconsider"],
     "subdomain": ["live_check", "fingerprint", "js_analysis"],
     "js_file": ["extract_endpoints", "extract_secrets", "test_secret_endpoints",
                 "secret_replay"],
@@ -62,6 +64,7 @@ TRIGGERS: dict[str, list[str]] = {
 #: Hərəkətlər → icra anatomiyası: "local" (bu modul icra edir) /
 #: "delegated" (Conductor-un artıq planlaşdırdığı mərhələ).
 ACTION_EXEC = {
+    "brain_reconsider": "local",
     "live_check": "delegated", "fingerprint": "delegated",
     "js_analysis": "delegated", "extract_endpoints": "delegated",
     "extract_secrets": "delegated", "test_secret_endpoints": "local",
@@ -295,6 +298,9 @@ class ChainPipeline:
         Qaytarır: kimlik sətri (icra et) və ya `None` (artıq edilib → atla).
         `task_ledger` yoxdursa `""` qaytarır — yəni qapı YOXDUR (köhnə davranış).
         """
+        if not self.auth.allows(test_type):
+            self.skipped.append(f"{test_type} (authorization: forbidden engine/action)")
+            return None
         if self.task_ledger is None:
             return ""
         identity = task_identity(self.store.scan_id, engine,
@@ -547,7 +553,8 @@ class ChainPipeline:
         if ident is None:
             return
         self._tasks += 1
-        sub = await ParamEnumEngine(self.ctx).run()
+        with self.auth.operation("param_enum"):
+            sub = await ParamEnumEngine(self.ctx).run()
         res.findings += sub.findings
         res.warnings += sub.warnings
         for action in ("hidden_param_detect", "param_fuzz"):
@@ -567,7 +574,8 @@ class ChainPipeline:
         if ident is None:
             return
         self._tasks += 1
-        sub = await APIFuzzEngine(self.ctx).run()
+        with self.auth.operation("api_fuzz"):
+            sub = await APIFuzzEngine(self.ctx).run()
         res.findings += sub.findings
         res.warnings += sub.warnings
         self.executed.append("schemathesis_fuzz")
@@ -639,7 +647,8 @@ class ChainPipeline:
                 interesting_urls = [e.detail for e in self.events
                                     if e.kind == "interesting_endpoint"][:25]
                 self._tasks += 1
-                sub = await BypassEngine(self.ctx).run(interesting_urls or None)
+                with self.auth.operation("bypass"):
+                    sub = await BypassEngine(self.ctx).run(interesting_urls or None)
                 res.findings += sub.findings
                 res.warnings += sub.warnings
                 self.executed.append("bypass_matrix")
@@ -649,7 +658,8 @@ class ChainPipeline:
             ident = self._begin("confirm_template", "confirm")
             if ident is not None:
                 self._tasks += 1
-                conf = await ConfirmEngine(self.ctx).run()
+                with self.auth.operation("confirm"):
+                    conf = await ConfirmEngine(self.ctx).run()
                 res.findings += conf.findings
                 self.executed.append("confirm_template")
                 self._done(ident)
@@ -659,7 +669,8 @@ class ChainPipeline:
             ident = self._begin("secret_replay", "secret_replay")
             if ident is not None:
                 self._tasks += 1
-                rep = await SecretReplayEngine(self.ctx).run()
+                with self.auth.operation("secret_replay"):
+                    rep = await SecretReplayEngine(self.ctx).run()
                 res.findings += rep.findings
                 res.warnings += rep.warnings
                 self.executed.append("secret_replay")
@@ -689,8 +700,15 @@ class ChainPipeline:
         # `self.executed` faktiki vəziyyəti əks etdirsin.
         await self._dispatch_followups()
 
+        from .brain.planner import BrainPlanner
+        brain = await BrainPlanner(self.ctx).run(budget=max(0, self.cfg_chain.max_tasks - self._tasks))
+        res.findings += brain.findings
+        res.warnings += brain.warnings
+        if brain.partial:
+            res.partial = True
         self._sync_chain_metrics()
         res.data = {
+            "brain": brain.data,
             "events": len(self.events),
             "executed": sorted(set(self.executed)),
             "delegated": sorted(set(self.delegated)),

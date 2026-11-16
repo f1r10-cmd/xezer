@@ -1,0 +1,55 @@
+{
+  "vuln_class": "api_authorization_weakness",
+  "preconditions": [
+    {
+      "name": "access_policy",
+      "required": true
+    },
+    {
+      "name": "distinct_privileges",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "api_operations",
+    "administrative_resources"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Compare read-only API operations under explicitly different permissions."
+  ],
+  "expected_behavior": "API operations must enforce the configured permission contract.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Protected API data disclosed to an identity without the required permission."
+  ],
+  "impact": "Unauthorized API access.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "api_authorization_weakness",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

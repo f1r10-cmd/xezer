@@ -81,7 +81,7 @@ def plan(strategy: str, rows):
     plan_metrics = {
         "considered": 0, "queued": 0, "deduplicated": 0,
         "eligible": Counter(), "excluded": Counter(), "deferred": Counter(),
-        "exclusion_reasons": Counter(), "families": 0,
+        "exclusion_reasons": Counter(), "deferred_reasons": Counter(), "families": 0,
     }
     if strategy == "baseline":
         # Deduplikasiya YOXDUR: hər sətir × hər mühərrik = tapşırıq.
@@ -106,6 +106,7 @@ def plan(strategy: str, rows):
                     plan_metrics["exclusion_reasons"][d.reason] += 1
                 else:
                     plan_metrics["deferred"][eng] += 1
+                    plan_metrics["deferred_reasons"][d.reason] += 1
                 continue
             plan_metrics["eligible"][eng] += 1
             plan_metrics["considered"] += 1
@@ -204,6 +205,7 @@ async def run_pipeline(strategy: str, rows) -> dict:
         "excluded": dict(pm["excluded"]),
         "deferred": dict(pm["deferred"]),
         "exclusion_reasons": dict(pm["exclusion_reasons"]),
+        "deferred_reasons": dict(pm["deferred_reasons"]),
         "executed": snap["executed"],
         "requests": requests["n"],
         "peak_queue": snap["peak_queue"],
@@ -265,17 +267,20 @@ class TestOrchestrationBenchmark:
 
         # --- 2. Məşru ƏHATƏ QORUNUR: bütün dinamik/axtarış endpointləri
         #        inject mühərrikləri üçün uyğundur (heç biri səhvən çıxarılmır).
-        inject_marked = [reason for reason in new["exclusion_reasons"]
-                         if any(e in reason for e in ("SQLI", "XSS", "SSTI"))]
+        inject_marked = [reason for reason in new["deferred_reasons"]
+                         if "applicability probe" in reason
+                         and any(e in reason for e in ("SQLI", "XSS", "SSTI"))]
         assert inject_marked, "inject mühərrikləri üçün istisna qeydə alınmalı"
         for reason in inject_marked:
             assert "statik" in reason, f"dinamik endpoint səhvən çıxarıldı: {reason}"
         for eng in INJECT_ENGINES:
             assert new["eligible"].get(eng, 0) > 0
 
-        # --- 3. İstisna YALNIZ statik/JS resurslardır və SƏBƏBLƏ qeyd olunur.
-        assert new["excluded"].get("js", 0) > 0
-        assert new["excluded"].get("api", 0) > 0
+        # --- 3. Kateqoriya testləri səbəblə təxirə salır; səssiz istisna yoxdur.
+        assert new["excluded"].get("js", 0) == 0
+        assert new["deferred"].get("js", 0) > 0
+        assert new["excluded"].get("api", 0) == 0
+        assert new["deferred"].get("api", 0) > 0
 
         # --- 4. Məhdud planlaşdırıcı tavanları aşılmır.
         assert 0 < new["peak_concurrency"] <= GLOBAL_LIMIT

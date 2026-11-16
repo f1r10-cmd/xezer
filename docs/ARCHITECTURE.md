@@ -1,163 +1,94 @@
-# Arxitektura — QBH v3.0 "Xəzər"
+<!-- coderabbit-ai-generated:v1 -->
 
-Bu sənəd QBH-ın faktiki implementasiyasını təsvir edir. Burada yalnız
-mövcud və yoxlanılmış davranış əks olunur.
+<!-- coderabbit-ai-generated-section:v1:5c91badf0e9ae22400abefa6e12445ff560bcc66fe14915a35d698c2053874c4 -->
 
-## Baxış
+# XEzer arxitekturası — Fazalar 0–8
 
-QBH asinxron (asyncio) Python platformasıdır. Tək CLI giriş nöqtəsi
-(`main.py`) konfiqurasiyanı yükləyir, `Conductor` mühərrikləri orkestrləşdirir,
-bütün HTTP trafiki `HttpPolicy` üzərindən keçir və nəticələr SQLite bazasında
-saxlanılır.
+## Axın və sahiblik
 
-```
-main.py  (CLI)
-   └── Conductor            — mərhələlərin orkestrləşdirilməsi
-         ├── Context        — mühərriklərə ötürülən paylaşılan vəziyyət
-         ├── Guardian       — scope + rate + cooldown/circuit-breaker + audit
-         │     └── HttpPolicy — vahid HTTP sorğu siyasəti
-         ├── StealthStack   — WAF adaptasiyası + humanizasiya + pacing/proxy
-         ├── Hunter         — avtomatik zəncir (--mode hunt)
-         ├── Engines[]      — recon / vuln / api / cve / validation
-         ├── vault.py       — şifrəli secret vault (Fernet)
-         ├── installer.py   — tool aşkarlama + quraşdırma
-         ├── db.py          — SQLite qatı
-         └── report/generator.py — Markdown + JSON hesabat
-```
-
-## Qovluq strukturu
-
-```
-qbh-xazar/
-├── main.py                     # CLI giriş nöqtəsi
-├── requirements.txt
-├── pytest.ini
-├── config/
-│   ├── examples/               # git-də saxlanılan təhlükəsiz nümunələr
-│   │   ├── example_local.yaml  # yalnız 127.0.0.1 (loopback nümunə)
-│   │   └── targets.example.yaml# real scope şablonu
-│   ├── targets.yaml            # yerli real scope (git-ignore)
-│   ├── proxies.txt             # (git-ignore)
-│   └── strategies/*.yaml       # fingerprint strategiyaları
-├── qbh/
-│   ├── config.py               # YAML yükləmə + profillər/RoE + ciddi validasiya
-│   ├── scope.py                # ScopeEnforcer, normalize_host, extract_host
-│   ├── authorization.py        # vahid scope/RoE qərar mərkəzi (fail-closed)
-│   ├── http_policy.py          # HttpPolicy, TargetBlocked, parse_retry_after
-│   ├── payloads.py             # WAF/filter bypass matrisi (path/header/verb)
-│   ├── chain.py                # ChainPipeline — tapıntı zəncirləmə
-│   ├── context.py              # Context dataclass
-│   ├── results.py              # EngineResult, StageResult
-│   ├── redact.py               # secret maskalama
-│   ├── vault.py                # şifrəli secret vault (Fernet)
-│   ├── hunter.py               # Hunter orkestratoru (--mode hunt)
-│   ├── db.py                   # SQLite sxem (v6) + miqrasiya + dedup + evidence
-│   ├── installer.py            # tool aşkarlama/quraşdırma
-│   ├── conductor.py            # orkestrasiya
-│   ├── stealth/                # WAF adaptasiyası, humanizasiya, pacing, proxy
-│   │   ├── waf.py              # WAF imzaları + rate/tamper/encoding
-│   │   ├── policy.py           # StealthPlan / build_plan (adaptiv qərar)
-│   │   ├── humanize.py         # UA hovuzu + brauzer başlıqları + jitter
-│   │   ├── impersonate.py      # TLS/HTTP2 brauzer təqlidi
-│   │   ├── pacing.py           # sorğular arası temp
-│   │   ├── proxy.py            # proxy strategiyası
-│   │   └── ladder.py           # eskalasiya nərdivanı
-│   ├── antiblock/
-│   │   ├── guardian.py         # blok/cooldown + adaptiv strategiya nəzarəti
-│   │   ├── identity.py         # configurable identiklik + rotasiya audit
-│   │   ├── proxymanager.py     # off / single / rotate
-│   │   └── ua_rotator.py       # UA hovuzu (rotasiya profilə görə)
-│   ├── engines/                # bütün mühərriklər
-│   ├── adapters/base.py        # shell-siz subprocess icrası
-│   └── report/                 # generator + HackerOne exporters
-├── tests/                      # pytest dəsti (562 test)
-└── docs/
+```mermaid
+flowchart TD
+    CLI[main.py] --> C[Conductor]
+    C --> S[TaskLedger + Scheduler]
+    S --> E[Mövcud mühərriklər]
+    E --> CH[Chain + AdaptiveController]
+    CH --> B[Brain planner + strategy plugins]
+    CLI --> H[Offline HAR importer]
+    H --> G[RequestGraph]
+    G --> B
+    B --> A[AuthStateMachine + DiffEngine]
+    E --> J[JS intelligence]
+    J --> B
+    C --> R[MD / JSON / HackerOne hesabatları]
+    C --> DB[(SQLite schema 12)]
+    H --> DB
+    B --> DB
 ```
 
-## Əsas komponentlər
+`Context` konfiqurasiya, Authorization, Guardian, vault və paylaşılan HTTP
+sessiyasının sahibidir. Conductor sonunda `Context.aclose()` çağırır.
+Scheduler faktiki icranı, TaskLedger planlaşdırma və dedup qərarlarını sayır.
+Plan sayı icra edilmiş test sayı kimi göstərilmir.
 
-### 1. CLI (`main.py`)
+## İcazə sərhədləri
 
-- `argparse` əsaslı; `build_parser()` / `run(args)` / `main(argv)`.
-- `Config.load(args.config)` ilə konfiq yükləyir (bu, əvvəlki buqlu
-  `Config(...)` çağırışını əvəz edir).
-- Çıxış kodları: `0` uğur, `1` mərhələ xətası / pipeline abort,
-  `2` istifadə və ya konfiq xətası, `130` Ctrl+C.
-- `KeyboardInterrupt` → yarımçıq nəticələr saxlanılır, hesabat yenə yazılır.
+`authorization.py` yeganə scope/RoE qərar mərkəzidir. `HttpPolicy` native
+sorğuları və redirect-ləri bu qərardan keçirir. Conductor/Chain əməliyyat adı
+ContextVar ilə hər native sorğuya daşınır; paralel task-lar bir-birinə qarışmır.
+`egress.py` subprocess başlamazdan əvvəl alət icazəsini, məlum target-ləri və
+DNS həllini yoxlayır. Bu yoxlama external binary-nin sonradan yaratdığı hər
+HTTPS path/method sorğusunu intercept etmir. Ona görə bütün trafik üçün
+path/method/429 zəmanəti yoxdur; release gate açıqdır.
 
-### 2. Conductor (`qbh/conductor.py`)
+## Faza xəritəsi
 
-- `resolve_targets()` — CLI `--targets` və konfiq hədəflərini
-  `Config.authorize_target` ilə süzür (fail-closed). Heç bir icazəli hədəf
-  qalmazsa `PipelineAbort`.
-- `_run_stage(stage, target, factory)` — mərhələni `factory` (callable →
-  korutin) vasitəsilə icra edir. `factory` sayəsində əvvəlki mərhələ uğursuz
-  olsa lazımsız korutin yaradılmır. `_run_stage` **heç vaxt `None`
-  qaytarmır** — həmişə `StageResult`.
-- Tool yoxlaması YALNIZ BİR DƏFƏ (`_ensure_tools`, `_tools_checked` bayrağı).
-- `_pipeline(mode, body)` — `finally` blokunda hesabat yaradılır və skan
-  `done` kimi bağlanır; `CancelledError` halında da.
-- `failed_stages` — uğursuz mərhələlərin siyahısı (çıxış kodu üçün).
+| Faza | Əsas modullar | Müqavilə |
+|---|---|---|
+| 0–2 | urlintel, tasks, scheduler, cache, recovery, db | URL identity, 4 vəziyyət, bounded execution, durable resume |
+| 3 | ingest/har_importer, ingest/request_graph | Offline idxal, şifrəli occurrence-lər, izah olunan inferred edges |
+| 4 | brain/classifier, context, planner, strategy, knowledge | 12 kateqoriya, 15 data-only sinif, IDOR/JWT plugins |
+| 5 | brain/diff_engine | Fərqlər və alternativ izahlar; avtomatik vulnerability qərarı yoxdur |
+| 6 | brain/auth_state, auth_config, resource_policy | ENV/vault credential, ayrıca sessiyalar, ownership əsasında IDOR |
+| 7 | adaptive, chain, brain/store, recovery | Prerequisite hash, bounded reconsideration, durable audit |
+| 8 | engines/jsanalysis, brain/js_intelligence | AST + mövcud fallback, source maps, HAR əlaqələri |
 
-### 3. Context (`qbh/context.py`)
+Phase 9 yoxdur; LLM tələb edilmir. Yeni strategy modulunun discovery-si mərkəzi
+orchestrator-u dəyişməyi tələb etmir. Bilik bazasında kod icra edilmir. İki yeni
+plugin bütün 15 sinif üçün yeni executor demək deyil: çatışmayan plugin-lər
+reason ilə deferred saxlanır, əvvəlki mühərriklər ayrıca işləyir.
 
-Mühərriklərə ötürülən paylaşılan vəziyyət: `cfg`, `args`, `guardian`,
-`scan_id`, `rate`, `limits`, `scope`, `active_fuzz`, `race_fixture`,
-`in_scope(host)` köməkçisi.
+## Bir verilənlər bazası
 
-### 4. Nəticə kontraktları (`qbh/results.py`)
+`qbh/db.py`, **SCHEMA_VERSION=12**. Migrations mövcud cədvəlləri saxlayır.
 
-- `EngineResult(stage, ok, skipped, findings, hosts, urls, warnings, errors,
-  data)` + `warn()` / `fail()` / `skip()`.
-- `StageResult(stage, status, started_at, completed_at, duration, target,
-  findings_count, errors, warnings, data)` + `to_dict()`.
-- `status` dəyərləri: `ok` · `failed` · `skipped` · `cancelled`.
+| Sahə | Cədvəllər |
+|---|---|
+| Mövcud skan/sübut | scans, hosts, urls, findings, evidence, stage_status, secrets |
+| Davamlılıq | task_state, event_state, followup_queue |
+| HAR | imported_requests, import_entries, request_graph_edges |
+| Brain | test_plans, test_plan_events, test_plan_results, plan_reconsiderations |
+| Auth / JS | auth_sessions, js_observations |
 
-### 5. Mühərriklər (`qbh/engines/`)
+FK və indekslər scan/plan əlaqələrini qoruyur. Şifrəli nəticə tarixçəsi əvvəlki
+nəticəni itirmir. Rədd edilmiş plana gec gələn nəticə tarixçədə qalır, rədd qərarı
+ləğv olunmur. Vault açarı DB-dən ayrı saxlanmalıdır; ciphertext report üçün
+raw sübut əvəzi deyil. CLI yalnız maskalanmış metadata göstərir.
 
-Hər mühərrik `(ctx)` qəbul edir və `run(...) -> EngineResult` təmin edir.
-Bütün HTTP əməliyyatları Guardian/HttpPolicy üzərindən keçir; subprocess
-icrası `adapters/base.run_process` vasitəsilə (`shell=False`) aparılır.
-Subprocess hədəfləri əvvəlcə `qbh/egress.EgressController`-dən keçir
-(scope validasiyası + DNS pinning + proses qrupu SIGKILL + audit).
+## Təsdiq və məhdudiyyətlər
 
-### 6. Baza (`qbh/db.py`)
+IDOR təsdiqi JSON owner-only siyasətinə əsaslanır; bilinməyən ownership,
+public resurs, eyni subject, rol uyğunsuzluğu, expiry və ambiguous policy
+confirmation yaratmır. DiffEngine timing üçün təkrar müqayisə edilə bilən
+ölçmələr tələb edir. JWT tool mətni server acceptance sübutu deyil.
 
-- Açıq sxem + `SCHEMA_VERSION` (hazırda 6) + `_migrate()` ilə təhlükəsiz
-  sütun əlavələri (mövcud data silinmir).
-- `init_db()` sırası: **cədvəllər → `_migrate` → indekslər**. İndekslər
-  `fingerprint` sütunundan asılıdır və köhnə bazalarda bu sütun sonradan
-  əlavə olunur.
-- UNIQUE məhdudiyyətləri → təkrar tapıntıların qarşısı.
-- `insert_finding()` `ON CONFLICT(fingerprint) DO UPDATE ... RETURNING id`
-  istifadə edir → təkrar halda **həqiqi** `id` qaytarır.
+Esprima 4.0.1 ECMAScript 2017 parsing istifadə edir; yeni sintaksis və dinamik
+ifadələrdə fallback/limitation qeyd olunur. JS permission işarəsi backend
+zəifliyi deyil. Source map büdcəsi: 5 map/JS, 20 embedded source/map; qalanlar
+səbəblə saxlanır. Xarici service reference-lər avtomatik test edilmir.
 
-### 7. Hesabat (`qbh/report/generator.py`)
+Cari test sayları, coverage, benchmark və CI nəticələri
+[FINAL_REPORT](FINAL_REPORT.md)-da saxlanır. Tarixi PHASE0–8 hesabatları həmin
+mərhələlərin nəticələridir; release hazırlığı üçün son hesabat əsasdır.
 
-- Markdown + JSON çıxışı (`reports/qbh_<zaman>.md|.json`).
-- Secret-lər `redact()` ilə maskalanır; etibarsız məzmun Markdown/HTML üçün
-  escape olunur.
-- `verified`/`confirmed` tapıntılar `potential` olanlardan ayrı göstərilir.
-- Mərhələ xətaları və atlanan addımlar hesabata daxil edilir; bəzi
-  mühərriklər uğursuz olsa da hesabat yazılır.
 
-## Məlumat axını (full mode)
-
-```
-resolve_targets() → deep_enum → recon → fingerprint
-  → [vuln | js | content | ferox] (paralel)
-  → api_enum → api_fuzz → param_enum → race → cve_intel → validation
-  → generate_report() → finish_scan()
-```
-
-## Məlumat axını (hunt mode — `qbh/hunter.py`)
-
-```
-subdomain → alive → fingerprint → JS → secret/param → fuzz → CVE
-  → confirm → PoC → report
-```
-
-Hər addım `Authorization` (scope + RoE) qapısından keçir; 401/403 hallarında
-bypass matrisi işə düşür, yüksək dəyərli endpoint-lər (admin/login/upload)
-üçün daha dərin zəncir qurulur. Stealth qatı (`StealthStack.plan()`) hər
-alət mərhələsi üçün rate/concurrency/UA qərarını verir və auditə yazır.
+<!-- /coderabbit-ai-generated:v1 -->

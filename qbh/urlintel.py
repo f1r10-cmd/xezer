@@ -744,7 +744,7 @@ def _static_blocked(ep: Endpoint) -> bool:
     return ep.category in STATIC_CATEGORIES or ep.category == CAT_JS
 
 
-def evaluate(ep: Endpoint, engine: str) -> Decision:
+def _evaluate_candidate(ep: Endpoint, engine: str) -> Decision:
     """Tək endpoint üçün mühərrik uyğunluğu (AÇIQLANAN səbəblə)."""
     if engine == "param":
         # Parametr KƏŞFİ (param_enum): statik resurslar mənasızdır, lakin
@@ -836,6 +836,16 @@ def evaluate(ep: Endpoint, engine: str) -> Decision:
 
     return Decision(engine, None, "deferred",
                     f"DEFERRED: naməlum mühərrik ({engine})", ep.original)
+
+
+def evaluate(ep: Endpoint, engine: str) -> Decision:
+    """Category is applicability evidence, never a scope permission denial."""
+    decision = _evaluate_candidate(ep, engine)
+    if decision.status == STATUS_INELIGIBLE:
+        return Decision(engine, None, STATUS_DEFERRED,
+                        "DEFERRED: applicability probe and prerequisites required; " + decision.reason,
+                        decision.evidence)
+    return decision
 
 
 # --------------------------------------------------------------------------- #
@@ -1253,3 +1263,71 @@ def record_intake(ctx) -> UrlIntake | None:
         "JOIN hosts h ON h.id=u.host_id WHERE h.scan_id=?",
         (db.effective_scan_id(getattr(ctx, "scan_id", None)),)).fetchall()
     return get_url_intelligence(ctx).intake(rows)
+
+
+async def probe_applicability(ctx):
+    """Touch every discovered in-scope URL through bounded existing scheduling.
+
+    Deferred rows remain in urls and TaskLedger with an explicit budget reason.
+    This probe is not vulnerability confirmation or a replacement for engines.
+    """
+    import aiohttp
+    from . import db
+    from .tasks import TaskLedger, task_identity, STATE_PARTIAL
+    from .scheduler import Scheduler, SchedTask, submit_with_backpressure
+    from .recovery import DurableStore, task_records
+    from .results import EngineResult
+    result = EngineResult(stage='applicability')
+    sid = db.effective_scan_id(ctx.scan_id)
+    ledger = getattr(ctx, 'task_ledger', None) or TaskLedger(store=DurableStore(sid))
+    if not ledger.tasks:
+        ledger.restore(task_records(sid))
+    cap = max(1, int(ctx.cfg.effective_concurrency))
+    budget = int(ctx.cfg.chain.max_tasks)
+    admitted = 0
+    deferred_ids, failed_ids = [], []
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
+        async with Scheduler(workers=cap, global_limit=cap, per_host_limit=1, ledger=ledger,
+                             guardian=ctx.guardian) as scheduler:
+            async def probe(row, identity):
+                try:
+                    ctx._auth().authorize_request('GET', row['url'])
+                    response = await ctx.guardian.get(session, row['url'], allow_redirects=False,
+                                                      retries=0, observe_block=False)
+                    record = ledger.get(identity)
+                    record.result_data = {'url_id': row['id'], 'status': response.status,
+                                          'truncated': response.truncated,
+                                          'reason': 'bounded_applicability_probe_completed'}
+                    ledger.persist_to_db(identity, result_data=record.result_data)
+                except Exception as exc:
+                    record = ledger.get(identity)
+                    record.result_data = {'url_id': row['id'], 'reason': 'probe_failed:' + type(exc).__name__}
+                    ledger.persist_to_db(identity, result_data=record.result_data)
+                    failed_ids.append(identity)
+                    result.mark_partial('applicability:' + type(exc).__name__)
+            for row in db.get_db().execute('SELECT id,url FROM urls WHERE scan_id=? ORDER BY id', (sid,)):
+                identity = task_identity(sid, 'applicability', str(row['id']))
+                record = ledger.get(identity)
+                if record is not None and record.state == 'completed':
+                    continue  # True duplicate; existing durable result remains the reason.
+                if admitted >= budget:
+                    deferred_ids.append(row['id'])
+                    result.mark_partial('bounded_applicability_budget; remaining URL rows retained')
+                    continue
+                decision = ledger.consider(identity, engine='applicability', endpoint='url:' + str(row['id']),
+                                           test_type='applicability')
+                if not decision.create:
+                    continue
+                task = SchedTask(identity=identity, engine='applicability', host=urlsplit(row['url']).hostname or '',
+                                 family='applicability', run=lambda r=dict(row), ident=identity: probe(r, ident))
+                if await submit_with_backpressure(scheduler, task):
+                    admitted += 1
+                else:
+                    ledger.mark(identity, STATE_PARTIAL, 'bounded_backpressure')
+                    result.mark_partial('bounded_backpressure')
+            await scheduler.drain()
+        for identity in failed_ids:
+            ledger.mark(identity, STATE_PARTIAL, ledger.get(identity).result_data['reason'])
+        result.data = {'scheduler': scheduler.snapshot(), 'admitted': admitted,
+                       'deferred_url_ids': deferred_ids, 'deferred_reason': 'bounded_applicability_budget'}
+    return result

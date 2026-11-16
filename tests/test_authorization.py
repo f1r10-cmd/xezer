@@ -129,11 +129,11 @@ class TestRuleGating:
 
 # ---------------------------------------------------------------- state changing
 class TestStateChangingGate:
-    """`--allow-state-changing` default OFF; proqram RoE-si həmişə qalib gəlir."""
+    """Əlavə CLI təsdiqi tələb edilmir; proqram RoE-si həmişə qalib gəlir."""
 
-    def test_default_off(self, load_config):
+    def test_default_permitted_without_extra_approval(self, load_config):
         cfg = _scope(load_config, ["example.com"])
-        assert from_config(cfg).allows("state_changing") is False
+        assert from_config(cfg).allows("state_changing") is True
 
     def test_explicit_flag_enables(self, load_config):
         cfg = _scope(load_config, ["example.com"])
@@ -150,7 +150,7 @@ class TestStateChangingGate:
 
     def test_summary_reports_state_changing(self, load_config):
         cfg = _scope(load_config, ["example.com"])
-        assert from_config(cfg).summary()["state_changing"] is False
+        assert from_config(cfg).summary()["state_changing"] is True
         assert from_config(
             cfg, allow_state_changing=True).summary()["state_changing"] is True
 
@@ -194,3 +194,70 @@ class TestCancellationAndDeadline:
         assert s["aggressiveness"] == "aggressive"
         assert "bypass" in s["forbidden"]
         assert s["cancelled"] is False
+
+
+def test_explicit_request_restrictions_do_not_expand_scope(load_config):
+    cfg = load_config([{'domain': '127.0.0.1', 'in_scope': ['127.0.0.1']}], extra={
+        'request_restrictions': [
+            {'hosts': ['127.0.0.1'], 'paths': ['/private/*'], 'methods': ['POST'], 'forbidden': ['*']},
+            {'hosts': ['127.0.0.1'], 'paths': ['/sensitive/*'], 'methods': ['*'], 'forbidden': ['idor']}]})
+    auth = from_config(cfg)
+    auth.authorize_request('GET', 'http://127.0.0.1/private/7', 'idor')
+    auth.authorize_request('POST', 'http://127.0.0.1/public/7')
+    auth.authorize_request('GET', 'http://127.0.0.1/sensitive/7', 'xss')
+    with pytest.raises(RuleForbidden):
+        auth.authorize_request('POST', 'http://127.0.0.1/private/7')
+    with pytest.raises(RuleForbidden):
+        auth.authorize_request('GET', 'http://127.0.0.1/sensitive/7', 'idor')
+    with pytest.raises(RuleForbidden):
+        auth.authorize_request('GET', 'http://127.0.0.1/%73ensitive/7', 'idor')
+    with pytest.raises(NotAuthorized):
+        auth.authorize_request('GET', 'http://outside.invalid/public')
+    with pytest.raises(RuleForbidden):
+        auth.authorize_request('POST', 'http://127.0.0.1/public', destructive=True)
+
+
+async def test_forbidden_post_is_blocked_at_actual_http_boundary(make_ctx, local_server):
+    from qbh.config import Config
+    runtime = make_ctx()
+    runtime.cfg.request_restrictions = Config._validate_request_restrictions([
+        {'hosts': ['127.0.0.1'], 'paths': ['/*'], 'methods': ['POST'], 'forbidden': ['*']}], [])
+    runtime.authorization = None
+    runtime._auth()
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(RuleForbidden):
+            await runtime.guardian.request(session, 'POST', local_server['base'] + '/')
+    await runtime.aclose()
+
+
+async def test_operation_identity_applies_per_request_and_is_task_local():
+    import asyncio
+    from qbh.authorization import Authorization, RuleForbidden
+    from qbh.scope import ScopeEnforcer
+    auth = Authorization(scope=ScopeEnforcer.from_entries([{'in_scope': ['127.0.0.1']}]))
+    auth.request_restrictions = [{'hosts': ['127.0.0.1'], 'paths': ['/private'],
+                                  'methods': ['GET'], 'forbidden': ['sqli']}]
+    async def request_as(action):
+        with auth.operation(action):
+            await asyncio.sleep(0)
+            if action == 'sqli':
+                with pytest.raises(RuleForbidden):
+                    auth.authorize_request('GET', 'http://127.0.0.1/private')
+                auth.authorize_request('GET', 'http://127.0.0.1/public')
+            else:
+                auth.authorize_request('GET', 'http://127.0.0.1/private')
+    await asyncio.gather(request_as('sqli'), request_as('xss'))
+    auth.authorize_request('GET', 'http://127.0.0.1/private')
+
+
+@pytest.mark.parametrize('stage,forbidden', [('js', 'jsanalysis'), ('jsanalysis', 'js'),
+                                          ('hidden_param_detect', 'param_enum')])
+def test_request_restrictions_resolve_existing_engine_aliases(load_config, stage, forbidden):
+    auth = from_config(_scope(load_config, ['127.0.0.1']))
+    auth.request_restrictions = [{'hosts': ['127.0.0.1'], 'paths': ['/private'],
+                                  'methods': ['GET'], 'forbidden': [forbidden]}]
+    with auth.operation(stage):
+        with pytest.raises(RuleForbidden):
+            auth.authorize_request('GET', 'http://127.0.0.1/private')
+        auth.authorize_request('GET', 'http://127.0.0.1/public')

@@ -1,0 +1,56 @@
+{
+  "vuln_class": "file_upload_weakness",
+  "preconditions": [
+    {
+      "name": "upload_endpoint",
+      "required": true
+    },
+    {
+      "name": "safe_fixture",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "file_upload_download"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Inspect policy and use harmless non-executable files only in a designated fixture."
+  ],
+  "expected_behavior": "Type, location and access restrictions must be enforced.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Repeatable policy violation with a harmless fixture file; extension acceptance alone is insufficient."
+  ],
+  "impact": "Unsafe handling of user-supplied files.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD",
+      "POST"
+    ],
+    "data_modification": true,
+    "destructive": false,
+    "designated_fixture_required": true
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "file_upload_weakness",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

@@ -133,7 +133,7 @@ async def test_403_rotate_impossible_falls_to_cooldown(local_server):
     assert policy.is_halted("127.0.0.1")
 
 
-async def test_429_rotate_strategy_rotates(local_server):
+async def test_429_legacy_rotate_strategy_respects_rate_limit(local_server):
     rot = _Rotator()
     policy = HttpPolicy(scope(["127.0.0.1"]), rate=1000, cooldown=0.1,
                         block_429="rotate", max_rotate_attempts=1)
@@ -141,7 +141,7 @@ async def test_429_rotate_strategy_rotates(local_server):
     async with aiohttp.ClientSession() as s:
         with pytest.raises(TargetBlocked):
             await policy.get(s, f"{local_server['base']}/429")
-    assert len(rot.rotated) == 1
+    assert len(rot.rotated) == 0
 
 
 async def test_429_honours_retry_after(local_server):
@@ -239,3 +239,21 @@ def test_summary_reports_blocks():
     assert summ["blocks"] == 1
     assert "127.0.0.1" in summ["blocked_hosts"]
     assert summ["rate"] == 5
+
+
+async def test_probe_cannot_disable_429_cooldown(local_server):
+    policy = HttpPolicy(scope(['127.0.0.1']), rate=1000, cooldown=1, block_429='rotate')
+    rot = _Rotator()
+    policy.identity_provider = rot
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(TargetBlocked):
+            await policy.get(session, local_server['base'] + '/429', observe_block=False)
+    assert not rot.rotated
+    assert policy.halt_remaining('127.0.0.1') >= 1.5
+
+
+def test_retry_after_is_not_shortened_by_internal_cap_or_concurrent_success():
+    policy = HttpPolicy(scope(['127.0.0.1']), cooldown=1, max_cooldown=3)
+    policy.record('127.0.0.1', 429, {'Retry-After': '60'})
+    policy.record('127.0.0.1', 200)
+    assert policy.halt_remaining('127.0.0.1') > 59

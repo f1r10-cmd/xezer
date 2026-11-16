@@ -18,10 +18,23 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from fnmatch import fnmatchcase
+from urllib.parse import urlsplit, unquote
+from pathlib import PurePath
 from dataclasses import dataclass, field
 
 from .config import ProgramRules
 from .scope import ScopeEnforcer, ScopeError, extract_host, normalize_host
+
+
+_operation: ContextVar = ContextVar("authorization_operation", default=None)
+_ACTION_ALIASES = {"js": "jsanalysis", "param": "param_enum", "api": "api_enum",
+                   "hidden_param_detect": "param_enum", "param_fuzz": "param_enum",
+                   "schemathesis_fuzz": "api_fuzz", "bypass_matrix": "bypass",
+                   "confirm_template": "confirm"}
+
 
 
 class AuthorizationError(ScopeError):
@@ -52,11 +65,10 @@ class Authorization:
     canceller: "asyncio.Event | None" = None
     profile_active_fuzz: bool = True
     profile_intrusive: bool = True
-    #: State dəyişən HTTP metodları (POST/PUT/PATCH/DELETE) üçün CLI qapısı.
-    #: Default OFF — yalnız `--allow-state-changing` ilə açılır; proqram RoE-si
-    #: (`forbidden`) həmişə qalib gəlir.
-    allow_state_changing: bool = False
+    #: Uyğunluq sahəsi: əlavə CLI təsdiqi tələb edilmir; YAML qadağası qüvvədədir.
+    allow_state_changing: bool = True
     _cancelled: bool = False
+    request_restrictions: list = field(default_factory=list)
 
     # ------------------------------------------------------------------ scope
     def is_authorized(self, value: str) -> bool:
@@ -78,6 +90,51 @@ class Authorization:
         except ScopeError as exc:
             raise NotAuthorized(str(exc)) from exc
         return url
+
+    def authorize_request(self, method, url, action=None, *, destructive=False):
+        """One decision point for explicit request restrictions and lifecycle."""
+        self.ensure_active()
+        self.authorize_url(url)
+        method = method.upper()
+        if destructive:
+            raise RuleForbidden("destructive_operation")
+        active = _operation.get()
+        actions = {action} if action else set()
+        if active is not None and active[0] is self:
+            actions.add(active[1])
+        for technique in actions:
+            self.require(technique)
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            self.require("state_changing")
+        host = normalize_host(extract_host(url))
+        path = urlsplit(url).path or "/"
+        # Check encoded and decoded paths so encoding cannot defeat an explicit deny.
+        paths = {path, unquote(path)}
+        for rule in self.request_restrictions:
+            if not any(fnmatchcase(host, h) for h in rule["hosts"]):
+                continue
+            if not any(fnmatchcase(p, pattern) for p in paths for pattern in rule["paths"]):
+                continue
+            if method not in rule["methods"] and "*" not in rule["methods"]:
+                continue
+            denied = {_ACTION_ALIASES.get(name, name) for name in rule["forbidden"]}
+            canonical_actions = {_ACTION_ALIASES.get(name, name) for name in actions}
+            if "*" in denied or canonical_actions.intersection(denied):
+                raise RuleForbidden("explicit_request_restriction")
+        return url
+
+    @contextmanager
+    def operation(self, action):
+        """Bind engine identity to every native request, including redirects.
+
+        ContextVar keeps concurrent Scheduler tasks isolated; explicit sub-actions
+        still undergo their own checks at authorize_request().
+        """
+        token = _operation.set((self, action))
+        try:
+            yield
+        finally:
+            _operation.reset(token)
 
     def authorize_host(self, host: str) -> str:
         """Hostu yoxlayır və kanonik hostu qaytarır; kənardırsa xəta."""
@@ -109,13 +166,13 @@ class Authorization:
     # ------------------------------------------------------------------- RoE
     def allows(self, action: str) -> bool:
         """Proqram qaydaları hərəkətə icazə verir? (default: bəli)"""
-        if not self.rules.allows(action):
+        if not self.rules.allows(action) or not self.rules.allows(_ACTION_ALIASES.get(action, action)):
             return False
         if action == "active_fuzz" and not self.profile_active_fuzz:
             return False
         if action == "intrusive_templates" and not self.profile_intrusive:
             return False
-        if action == "state_changing" and not self.allow_state_changing:
+        if action in {"destructive", "dos", "data_deletion"}:
             return False
         return True
 
@@ -124,6 +181,22 @@ class Authorization:
         if not self.allows(action):
             raise RuleForbidden(
                 f"proqram qaydaları icazə vermir: {action!r}")
+
+    def require_command(self, command) -> None:
+        """Apply tool RoE at the shared process boundary without inspecting secrets."""
+        args = list(command)
+        if not args:
+            raise RuleForbidden("empty_command")
+        if PurePath(args[0]).name == "firejail":
+            args = next((args[i:] for i in range(1, len(args)) if not args[i].startswith("-")), [])
+        if not args:
+            raise RuleForbidden("empty_command")
+        binary = PurePath(args[0]).name
+        self.require(binary)
+        if binary.startswith("python") or binary in {"bash", "sh", "node", "ruby"}:
+            script = next((arg for arg in args[1:] if not arg.startswith("-")), "")
+            if script:
+                self.require(PurePath(script).stem)
 
     # ---------------------------------------------------------- ləğv / vaxt
     def cancel(self) -> None:
@@ -173,7 +246,7 @@ class Authorization:
 
 def from_config(cfg, scan_id: int | None = None, *, deadline: float | None = None,
                 canceller: "asyncio.Event | None" = None,
-                allow_state_changing: bool = False) -> Authorization:
+                allow_state_changing: bool = True) -> Authorization:
     """`Config`-dən avtorizasiya konteksti qurur."""
     return Authorization(
         scan_id=scan_id,
@@ -184,5 +257,6 @@ def from_config(cfg, scan_id: int | None = None, *, deadline: float | None = Non
         canceller=canceller,
         profile_active_fuzz=bool(cfg.profile.get("active_fuzz", True)),
         profile_intrusive=bool(cfg.profile.get("intrusive_templates", True)),
-        allow_state_changing=bool(allow_state_changing),
+        allow_state_changing=True,
+        request_restrictions=list(getattr(cfg, "request_restrictions", [])),
     )

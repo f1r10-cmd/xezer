@@ -36,15 +36,15 @@ class TestNormalizeStatus:
     def test_mapping(self, raw, expected):
         assert db.normalize_status(raw) == expected
 
-    def test_schema_version_is_7(self, tmp_db):
+    def test_schema_version_is_12(self, tmp_db):
         # v5: `hosts.scan_id` + UNIQUE(scan_id, subdomain) → skan izolyasiyası.
         # v6: `secrets.value_enc` — şifrəli secret vault (Faza 3.2).
         # v7: Faza 2 davamlı icra cədvəlləri (`task_state`, `event_state`,
         #     `followup_queue`) — bərpa/`--resume` üçün.
-        assert db.SCHEMA_VERSION == 7
+        assert db.SCHEMA_VERSION == 12
         row = tmp_db.get_db().execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert row["value"] == "7"
+        assert row["value"] == "12"
 
 
 # ---------------------------------------------------------------- lifecycle

@@ -1,0 +1,55 @@
+{
+  "vuln_class": "privilege_escalation",
+  "preconditions": [
+    {
+      "name": "access_policy",
+      "required": true
+    },
+    {
+      "name": "distinct_privileges",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "administrative_resources",
+    "account_management"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Probe a non-mutating privileged operation using a lower privilege identity."
+  ],
+  "expected_behavior": "Lower privilege identities must be denied privileged operations.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Effective privileged access demonstrated without changing roles or data."
+  ],
+  "impact": "Access beyond the assigned role.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "privilege_escalation",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

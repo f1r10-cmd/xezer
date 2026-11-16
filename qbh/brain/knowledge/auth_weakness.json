@@ -1,0 +1,55 @@
+{
+  "vuln_class": "auth_weakness",
+  "preconditions": [
+    {
+      "name": "authentication_endpoint",
+      "required": true
+    },
+    {
+      "name": "synthetic_credentials",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "authentication"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Use designated synthetic accounts and bounded negative authentication controls."
+  ],
+  "expected_behavior": "Invalid credentials must not establish an authenticated session.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Invalid authentication accepted and a protected read independently succeeds."
+  ],
+  "impact": "Unauthorized authentication.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD",
+      "POST"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "auth_weakness",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

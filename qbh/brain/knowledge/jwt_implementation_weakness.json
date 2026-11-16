@@ -1,0 +1,52 @@
+{
+  "vuln_class": "jwt_implementation_weakness",
+  "preconditions": [
+    {
+      "name": "jwt_token",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "authentication",
+    "api_operations"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Inspect JWT structure offline using existing JWT parsing; active confirmation remains a separate authorized test."
+  ],
+  "expected_behavior": "Malformed or unsigned tokens must not be accepted for protected access.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Protected access using a modified invalid signature with valid baseline and negative control."
+  ],
+  "impact": "Authentication or authorization bypass if server acceptance is independently verified.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "jwt_implementation_weakness",
+    "active_fuzz",
+    "jwt"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

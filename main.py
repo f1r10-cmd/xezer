@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-state-changing", dest="allow_state_changing",
                    action="store_true", default=False,
                    help="state dəyişən HTTP metodlarına (POST/PUT/PATCH/DELETE) "
-                        "icazə ver — default OFF; proqram RoE-si həmişə qalib gəlir")
+                        "uyğunluq flag-i; icazəni YAML təyin edir, əlavə təsdiq tələb edilmir")
     p.add_argument("--race-fixture", default=None,
                    help="race testi üçün YALNIZ lokal loopback fixture URL-i")
     p.add_argument("--race-count", type=int, default=10,
@@ -90,6 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="gözləyən davam testlərini (followup_queue) göstər")
     p.add_argument("--scan-id", dest="scan_id", type=int, default=None,
                    help="əməliyyatı konkret skana tətbiq et")
+    p.add_argument("--import-har", help="HAR faylını offline idxal et")
+    p.add_argument("--list-imported", action="store_true")
+    p.add_argument("--request-graph", action="store_true")
+    p.add_argument("--compare-scans", nargs=2, type=int, metavar=("LEFT", "RIGHT"))
+    p.add_argument("--findings", action="store_true", help="scan tapıntılarının maskalanmış xülasəsini göstər")
+    p.add_argument("--test-plan", action="store_true", help="test planları və ilkin şərtləri göstər")
+    decisions = p.add_mutually_exclusive_group()
+    decisions.add_argument("--approve", nargs="?", const="*", metavar="PLAN_ID")
+    decisions.add_argument("--reject", metavar="PLAN_ID")
+    p.add_argument("--reason", default="cli_decision", help="plan qərarının səbəbi")
     return p
 
 
@@ -123,6 +133,91 @@ def _show_pending_followups(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if getattr(args, "findings", False) or getattr(args, "compare_scans", None):
+        import json
+        from qbh import db
+        from qbh.report.inspection import findings, compare
+        db.init_db()
+        try:
+            result = compare(*args.compare_scans) if args.compare_scans else findings(args.scan_id, args.severity)
+        except ValueError:
+            print("[!] Skan və ya severity etibarsızdır")
+            return EXIT_USAGE
+        print(json.dumps(result, ensure_ascii=False))
+        return EXIT_OK
+    if getattr(args, "test_plan", False):
+        import json
+        from qbh import db
+        from qbh.brain import store
+        from qbh.brain.planner import BrainPlanner
+        from qbh.redact import redact
+        db.init_db()
+        sid = args.scan_id
+        if sid is None:
+            row = db.get_db().execute("SELECT id FROM scans ORDER BY id DESC LIMIT 1").fetchone()
+            sid = row['id'] if row else None
+        if sid is None or db.get_scan(sid) is None:
+            print("[!] Skan tapılmadı")
+            return EXIT_USAGE
+        cfg = Config.load(args.config)
+        conductor = Conductor(cfg, args)
+        conductor.ctx.scan_id = sid
+        try:
+            planner = BrainPlanner(conductor.ctx)
+            rows = planner.prepare_scan()
+            choice = args.approve or args.reject
+            if choice:
+                selected = [r['id'] for r in rows] if choice == '*' and args.approve else [choice]
+                for plan_id in selected:
+                    store.decide(plan_id, sid, approve=bool(args.approve), reason=redact(args.reason))
+                if args.approve:
+                    await conductor.ctx.initialize_auth()
+                planner.prepare_scan()
+                if args.approve:
+                    await planner.execute_ready()
+            print(json.dumps(store.list_plans(sid), ensure_ascii=False))
+            return EXIT_OK
+        except ValueError:
+            print("[!] Plan və ya plan üçün tələb olunan sübut əlçatan deyil")
+            return EXIT_USAGE
+        finally:
+            await conductor.ctx.aclose()
+    if any(getattr(args, flag, False) for flag in ("import_har", "list_imported", "request_graph")):
+        import json
+        from qbh import db
+        from qbh.ingest.har_importer import HarImporter, list_imported
+        from qbh.ingest.request_graph import RequestGraph
+        from qbh.vault import SecretVault
+        db.init_db()
+        if args.import_har:
+            cfg = Config.load(args.config)
+            vault = SecretVault.from_config(cfg)
+            try:
+                result = HarImporter(vault).import_file(args.import_har, args.scan_id)
+                if vault.available:
+                    RequestGraph(result['scan_id'], vault).infer()
+                    from qbh.context import Context
+                    from qbh.brain.planner import BrainPlanner
+                    runtime = Context(cfg, args, None, scan_id=result['scan_id'])
+                    runtime._vault = vault
+                    await runtime.initialize_auth(offline=True)
+                    from qbh.adaptive import note_evidence
+                    from qbh.ingest.har_importer import digest
+                    note_evidence(runtime, 'har_import_completed', digest(
+                        [entry.get('request_id') for entry in result['entries']]))
+                    result['feedback_plans'] = len(BrainPlanner(runtime).prepare_scan())
+            except (ValueError, KeyError, TypeError):
+                print("[!] HAR formatı və ya skan identifikatoru etibarsızdır")
+                return EXIT_USAGE
+            print(json.dumps(result, ensure_ascii=False))
+            return EXIT_FAILURE if result['blocked'] or result['invalid'] else EXIT_OK
+        nodes = list_imported(args.scan_id)
+        if args.request_graph:
+            scans = sorted({n['scan_id'] for n in nodes})
+            print(json.dumps({'nodes': nodes, 'edges': [e for sid in scans for e in RequestGraph(sid).edges()]}, ensure_ascii=False))
+        else:
+            print(json.dumps(nodes, ensure_ascii=False))
+        return EXIT_OK
     # Faza 2: davam-testləri sorğusu skan konfiqurasiyası olmadan da işləyir.
     if getattr(args, "pending_followups", False):
         return _show_pending_followups(args)

@@ -553,7 +553,8 @@ class ChainPipeline:
         if ident is None:
             return
         self._tasks += 1
-        sub = await ParamEnumEngine(self.ctx).run()
+        with self.auth.operation("param_enum"):
+            sub = await ParamEnumEngine(self.ctx).run()
         res.findings += sub.findings
         res.warnings += sub.warnings
         for action in ("hidden_param_detect", "param_fuzz"):
@@ -573,7 +574,8 @@ class ChainPipeline:
         if ident is None:
             return
         self._tasks += 1
-        sub = await APIFuzzEngine(self.ctx).run()
+        with self.auth.operation("api_fuzz"):
+            sub = await APIFuzzEngine(self.ctx).run()
         res.findings += sub.findings
         res.warnings += sub.warnings
         self.executed.append("schemathesis_fuzz")
@@ -645,7 +647,8 @@ class ChainPipeline:
                 interesting_urls = [e.detail for e in self.events
                                     if e.kind == "interesting_endpoint"][:25]
                 self._tasks += 1
-                sub = await BypassEngine(self.ctx).run(interesting_urls or None)
+                with self.auth.operation("bypass"):
+                    sub = await BypassEngine(self.ctx).run(interesting_urls or None)
                 res.findings += sub.findings
                 res.warnings += sub.warnings
                 self.executed.append("bypass_matrix")
@@ -655,7 +658,8 @@ class ChainPipeline:
             ident = self._begin("confirm_template", "confirm")
             if ident is not None:
                 self._tasks += 1
-                conf = await ConfirmEngine(self.ctx).run()
+                with self.auth.operation("confirm"):
+                    conf = await ConfirmEngine(self.ctx).run()
                 res.findings += conf.findings
                 self.executed.append("confirm_template")
                 self._done(ident)
@@ -665,7 +669,8 @@ class ChainPipeline:
             ident = self._begin("secret_replay", "secret_replay")
             if ident is not None:
                 self._tasks += 1
-                rep = await SecretReplayEngine(self.ctx).run()
+                with self.auth.operation("secret_replay"):
+                    rep = await SecretReplayEngine(self.ctx).run()
                 res.findings += rep.findings
                 res.warnings += rep.warnings
                 self.executed.append("secret_replay")

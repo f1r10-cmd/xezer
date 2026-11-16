@@ -107,7 +107,7 @@ async def resolve_httpx(*, timeout: float = 20.0) -> str:
 class ToolSpec:
     name: str
     version_cmd: tuple[str, ...]
-    install_kind: str            # "go" | "pip" | "manual"
+    install_kind: str            # "go" | "pip" | "cargo" | "manual"
     install_cmd: tuple[str, ...] | None
     required: bool
     binary: str = ""
@@ -145,12 +145,13 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("gau", ("gau", "--version"), "go",
              ("go", "install", "-v",
               "github.com/lc/gau/v2/cmd/gau@latest"), False),
-    ToolSpec("jsluice", ("jsluice", "version"), "go",
+    ToolSpec("jsluice", ("jsluice", "--help"), "go",
              ("go", "install", "-v",
               "github.com/BishopFox/jsluice/cmd/jsluice@latest"), False),
-    ToolSpec("x8", ("x8", "--help"), "go",
-             ("go", "install", "github.com/Ne0nd0g/x8@latest"), False),
-    ToolSpec("arjun", ("arjun", "--version"), "pip",
+    ToolSpec("x8", ("x8", "--help"), "cargo",
+             ("cargo", "install", "x8"), False,
+             manual_hint="Rust/Cargo quraşdırın, sonra cargo install x8; Cargo bin qovluğunu PATH-a əlavə edin"),
+    ToolSpec("arjun", ("arjun", "--help"), "pip",
              ("python", "-m", "pip", "install", "arjun"), False),
     ToolSpec("schemathesis", ("schemathesis", "--version"), "pip",
              ("python", "-m", "pip", "install", "schemathesis"), False),
@@ -257,13 +258,19 @@ async def _detect_one(spec: ToolSpec) -> ToolStatus:
     if spec.name == "httpx":
         return await _detect_httpx(spec)
     if shutil.which(spec.binary_name()) is None:
-        return ToolStatus(spec.name, spec.required, False, spec.install_kind)
+        return ToolStatus(spec.name, spec.required, False, spec.install_kind,
+                          install_status="missing",
+                          manual_action=spec.manual_hint or " ".join(spec.install_cmd or spec.version_cmd))
     res = await run_process(list(spec.version_cmd), timeout=20)
+    if not res.ok:
+        return ToolStatus(spec.name, spec.required, False, spec.install_kind,
+                          install_status="failed", error=f"binary yoxlaması uğursuz: {res.returncode}",
+                          manual_action=spec.manual_hint or " ".join(spec.install_cmd or spec.version_cmd))
     version = _parse_version(res.stdout.decode(errors="ignore")
                              or res.stderr.decode(errors="ignore"))
     return ToolStatus(spec.name, spec.required, True, spec.install_kind,
-                      version=version, install_status="present",
-                      verified=True)
+                      version="" if any(a in {"-h", "--help"} for a in spec.version_cmd) else version,
+                      install_status="present", verified=True)
 
 
 async def _detect_httpx(spec: ToolSpec) -> ToolStatus:
@@ -275,13 +282,15 @@ async def _detect_httpx(spec: ToolSpec) -> ToolStatus:
     """
     path = await resolve_httpx()
     if not path:
-        return ToolStatus(spec.name, spec.required, False, spec.install_kind)
+        return ToolStatus(spec.name, spec.required, False, spec.install_kind,
+                          install_status="missing",
+                          manual_action=spec.manual_hint or " ".join(spec.install_cmd or spec.version_cmd))
     res = await run_process([path, "-version"], timeout=20)
     version = _parse_version((res.stdout + b"\n"
                               + res.stderr).decode(errors="ignore"))
     return ToolStatus(spec.name, spec.required, True, spec.install_kind,
-                      version=version, install_status="present",
-                      verified=True)
+                      version="" if any(a in {"-h", "--help"} for a in spec.version_cmd) else version,
+                      install_status="present", verified=True)
 
 
 async def _check_go() -> tuple[bool, str]:
@@ -348,13 +357,13 @@ async def _do_install(spec: ToolSpec, status: ToolStatus) -> None:
     if res.missing:
         status.install_status = "failed"
         status.error = f"{spec.install_cmd[0]} tapılmadı"
-        status.manual_action = spec.manual_hint
+        status.manual_action = spec.manual_hint or " ".join(spec.install_cmd or ())
         return
     if res.timed_out or res.returncode != 0:
         status.install_status = "failed"
         status.error = (f"çıxış kodu {res.returncode}"
                         + (" (timeout)" if res.timed_out else ""))
-        status.manual_action = spec.manual_hint
+        status.manual_action = spec.manual_hint or " ".join(spec.install_cmd or ())
         return
 
     # Qurulumdan SONRA mütləq yoxlama — "uğurlu" yalnız binary işləyirsə

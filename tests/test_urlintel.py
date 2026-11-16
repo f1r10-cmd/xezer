@@ -195,9 +195,9 @@ class TestEligibility:
 
     def test_static_css_excluded_from_sqli(self):
         d = u.evaluate(u.analyze("http://h/style.css"), "sqli")
-        assert d.eligible is False
-        assert d.status == "ineligible"
-        assert d.reason.startswith("SKIPPED")
+        assert d.eligible is None
+        assert d.status == "deferred"
+        assert d.reason.startswith("DEFERRED")
         assert "statik" in d.reason
 
     def test_no_params_deferred(self):
@@ -221,17 +221,17 @@ class TestEligibility:
         assert u.evaluate(u.analyze("http://h/api/v1/users"),
                           "api").eligible is True
         assert u.evaluate(u.analyze("http://h/index.html"),
-                          "api").eligible is False
+                          "api").eligible is None
 
     def test_js_engine_scoped_to_js(self):
         assert u.evaluate(u.analyze("http://h/app.js"),
                           "js").eligible is True
         assert u.evaluate(u.analyze("http://h/logo.png"),
-                          "js").eligible is False
+                          "js").eligible is None
 
     def test_image_excluded_from_content(self):
         assert u.evaluate(u.analyze("http://h/logo.png"),
-                          "content").eligible is False
+                          "content").eligible is None
 
     def test_decision_records_original_url(self):
         ep = u.analyze("http://h/product?id=1")
@@ -285,8 +285,8 @@ class TestPlanRows:
         assert plan.unique == 4
         assert plan.duplicates == 1
         assert plan.eligible == 1        # yalnız p?id=1
-        assert plan.excluded == 2        # a.css + app.js
-        assert plan.deferred == 1        # mystery
+        assert plan.excluded == 0        # a.css + app.js
+        assert plan.deferred == 3        # mystery
         assert [r["id"] for r in kept] == [2]
 
     def test_exclusion_reasons_recorded(self):
@@ -322,8 +322,8 @@ class TestIntakeAndMetrics:
         assert m.urls_duplicate == 1
         intel.plan_rows(ROWS, engine="sqli", limit=10)
         assert m.eligible["sqli"] == 1
-        assert m.excluded["sqli"] == 2
-        assert m.deferred["sqli"] == 1
+        assert m.excluded["sqli"] == 0
+        assert m.deferred["sqli"] == 3
         snap = m.snapshot()
         assert snap["urls"]["raw"] == 5
         assert snap["eligibility"]["eligible"]["sqli"] == 1

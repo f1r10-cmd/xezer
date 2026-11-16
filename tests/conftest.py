@@ -257,8 +257,8 @@ async def vuln_app():
         await runner.cleanup()
 
 
-@pytest.fixture
-def make_ctx(loopback_config):
+@pytest_asyncio.fixture
+async def make_ctx(loopback_config):
     """Mühərrik testləri üçün real `Context` yaradır (şəbəkəsiz)."""
     import argparse
 
@@ -266,6 +266,8 @@ def make_ctx(loopback_config):
     from qbh.antiblock.identity import IdentityManager
     from qbh.context import Context
     from qbh.http_policy import HttpPolicy
+
+    contexts = []
 
     def _make(cfg=None, *, active_fuzz=None, race_fixture=None,
               race_count=10, race_concurrency=4):
@@ -275,6 +277,10 @@ def make_ctx(loopback_config):
         args = argparse.Namespace(
             rate=1000, active_fuzz=active_fuzz, race_fixture=race_fixture,
             race_count=race_count, race_concurrency=race_concurrency)
-        return Context(cfg=cfg, args=args, guardian=guardian, scan_id=None)
+        context = Context(cfg=cfg, args=args, guardian=guardian, scan_id=None)
+        contexts.append(context)
+        return context
 
-    return _make
+    yield _make
+    for context in contexts:
+        await context.aclose()

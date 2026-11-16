@@ -93,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--import-har", help="HAR faylını offline idxal et")
     p.add_argument("--list-imported", action="store_true")
     p.add_argument("--request-graph", action="store_true")
+    p.add_argument("--compare-scans", nargs=2, type=int, metavar=("LEFT", "RIGHT"))
+    p.add_argument("--findings", action="store_true", help="scan tapıntılarının maskalanmış xülasəsini göstər")
     p.add_argument("--test-plan", action="store_true", help="test planları və ilkin şərtləri göstər")
     decisions = p.add_mutually_exclusive_group()
     decisions.add_argument("--approve", nargs="?", const="*", metavar="PLAN_ID")
@@ -131,6 +133,18 @@ def _show_pending_followups(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if getattr(args, "findings", False) or getattr(args, "compare_scans", None):
+        import json
+        from qbh import db
+        from qbh.report.inspection import findings, compare
+        db.init_db()
+        try:
+            result = compare(*args.compare_scans) if args.compare_scans else findings(args.scan_id, args.severity)
+        except ValueError:
+            print("[!] Skan və ya severity etibarsızdır")
+            return EXIT_USAGE
+        print(json.dumps(result, ensure_ascii=False))
+        return EXIT_OK
     if getattr(args, "test_plan", False):
         import json
         from qbh import db

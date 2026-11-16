@@ -229,3 +229,23 @@ async def test_forbidden_post_is_blocked_at_actual_http_boundary(make_ctx, local
         with pytest.raises(RuleForbidden):
             await runtime.guardian.request(session, 'POST', local_server['base'] + '/')
     await runtime.aclose()
+
+
+async def test_operation_identity_applies_per_request_and_is_task_local():
+    import asyncio
+    from qbh.authorization import Authorization, RuleForbidden
+    from qbh.scope import ScopeEnforcer
+    auth = Authorization(scope=ScopeEnforcer.from_entries([{'in_scope': ['127.0.0.1']}]))
+    auth.request_restrictions = [{'hosts': ['127.0.0.1'], 'paths': ['/private'],
+                                  'methods': ['GET'], 'forbidden': ['sqli']}]
+    async def request_as(action):
+        with auth.operation(action):
+            await asyncio.sleep(0)
+            if action == 'sqli':
+                with pytest.raises(RuleForbidden):
+                    auth.authorize_request('GET', 'http://127.0.0.1/private')
+                auth.authorize_request('GET', 'http://127.0.0.1/public')
+            else:
+                auth.authorize_request('GET', 'http://127.0.0.1/private')
+    await asyncio.gather(request_as('sqli'), request_as('xss'))
+    auth.authorize_request('GET', 'http://127.0.0.1/private')

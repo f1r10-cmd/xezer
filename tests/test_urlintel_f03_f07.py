@@ -47,9 +47,9 @@ class TestParamEngineRule:
         for target in ("http://h/style.css", "http://h/logo.png",
                        "http://h/app.js", "http://h/f.woff2"):
             d = u.evaluate(u.analyze(target), "param")
-            assert d.eligible is False, target
-            assert d.status == "ineligible"
-            assert d.reason.startswith("SKIPPED")
+            assert d.eligible is None, target
+            assert d.status == "deferred"
+            assert d.reason.startswith("DEFERRED")
 
     def test_param_decision_records_reason_and_original(self):
         ep = u.analyze("http://h/style.css")
@@ -66,13 +66,13 @@ class TestJSEngineRules:
             assert u.evaluate(u.analyze("http://h/bundle", is_js=True),
                               engine).eligible is True
             assert u.evaluate(u.analyze("http://h/style.css"),
-                              engine).eligible is False
+                              engine).eligible is None
             assert u.evaluate(u.analyze("http://h/api/v1/users"),
-                              engine).eligible is False
+                              engine).eligible is None
 
     def test_js_exclusion_reason_recorded(self):
         d = u.evaluate(u.analyze("http://h/style.css"), "js")
-        assert d.status == "ineligible"
+        assert d.status == "deferred"
         assert "JS" in d.reason
 
 
@@ -97,8 +97,8 @@ class TestPlanRowsIntegration:
                                                    limit=10)
         assert plan.eligible == 2
         # css + /api + /page — heç biri JS deyil → hamısı istisna olunur.
-        assert plan.excluded == 3
-        assert plan.deferred == 0
+        assert plan.excluded == 0
+        assert plan.deferred == 3
         assert {r["id"] for r in kept} == {1, 2}
 
     def test_param_engine_keeps_dynamic_not_static(self):
@@ -106,7 +106,7 @@ class TestPlanRowsIntegration:
                                                    limit=10)
         # app.js/lib.js/style.css istisna; api + page uyğun.
         assert {r["id"] for r in kept} == {4, 5}
-        assert plan.excluded == 3
+        assert plan.excluded == 0
 
     def test_rows_preserve_original_columns(self):
         kept, _ = u.UrlIntelligence().plan_rows(ROWS_MIXED, engine="js",
@@ -121,7 +121,7 @@ class TestPlanRowsIntegration:
         u.UrlIntelligence(metrics=m).plan_rows(ROWS_MIXED, engine="js",
                                                limit=10)
         assert m.eligible["js"] == 2
-        assert m.excluded["js"] == 3
+        assert m.excluded["js"] == 0
         assert all(r.startswith("SKIPPED")
                    for r in m.exclusion_reasons)
 

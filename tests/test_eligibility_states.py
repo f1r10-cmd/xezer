@@ -11,7 +11,7 @@ Yoxlanılan prinsiplər (hamısı şəbəkəsiz — yalnız qərar qatı):
   * Heç bir test YALNIZ profil natamam olduğu üçün atılmır: `unknown` halında
     `skip` səbəbi YOXDUR (`reason` "UNKNOWN" ilə başlayır, "SKIPPED" ilə yox).
   * URL-nümunəsinin qəti qərarı (statik resurs) profil tərəfindən
-    YUMŞALDILMIR — belə endpoint hər halda `ineligible` qalır.
+    YUMŞALDILMIR — belə endpoint applicability probe üçün `deferred` qalır.
   * `fingerprint=None` → geriyə-uyğun `evaluate()` davranışı (heç nə dəyişmir).
 """
 from __future__ import annotations
@@ -145,15 +145,17 @@ class TestFingerprintArrivalResolvesUnknown:
 # --------------------------------------------------------------------------- #
 # URL-nümunəsinin qəti qərarı profil tərəfindən YUMŞALDILMIR
 # --------------------------------------------------------------------------- #
-class TestUrlPatternDecisionNotSoftened:
-    def test_static_resource_stays_ineligible_even_with_matching_fingerprint(self):
+class TestUrlPatternDecisionRetained:
+    def test_static_resource_stays_deferred_even_with_matching_fingerprint(self):
         ep = u.analyze("http://h/style.css")
         complete = u.Fingerprint.from_iterable(["php"], complete=True)
-        # URL özü qəti istisna edir (statik resurs) → profil bunu dəyişmir.
-        for engine in ("ssti", "library_cve"):
+        # Statik kateqoriya applicability probe tələb edir; fingerprint bunu silmir.
+        for engine, technology in (("ssti", "php"), ("library_cve", "react")):
+            complete = u.Fingerprint.from_iterable([technology], complete=True)
             d = u.compute_eligibility(ep, engine, fingerprint=complete)
-            assert d.status == u.STATUS_INELIGIBLE
-            assert d.eligible is False
+            assert d.status == u.STATUS_DEFERRED
+            assert d.eligible is None
+            assert 'applicability probe' in d.reason
 
     def test_non_gated_engine_unaffected_by_fingerprint(self):
         ep = u.analyze("http://h/page?id=1")

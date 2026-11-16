@@ -5,7 +5,7 @@ token-lər. Analiz:
   * **Oflayn (ələtdən asılı olmayan):** header/payload açılır, `alg`, iddialar
     (claims) və müddət (`exp`) yoxlanılır → informativ `candidate`.
   * **jwt_tool** mövcuddursa: `alg:none` (`-X a`) və `kid` inyeksiyası
-    (`-X i`) yoxlanılır → yalnız alət pozitivliyi ilə `confirmed`.
+    (`-X i`) yoxlanılır → server acceptance sübutu olmadan `candidate`.
 
 Dürüstlük: xam token/signature HEÇ VAXT saxlanmır — yalnız maskalanmış
 (`redact`) və dekodlanmış iddialar hesabata düşür.
@@ -153,15 +153,13 @@ class JWTEngine(OffensiveEngine):
         if not self.tool_present():
             return
         out = await self._run_tool(tok)
-        if out and re.search(r"(\[+\]\s*(VULNERABLE|success|accepted)|"
-                             r"alg.*none|cracked|key found)", out, re.I):
-            self.confirm(fid, "marker",
-                         redact(f"jwt_tool sübutu: {out[:800]}"),
-                         confidence=0.9)
-            res.findings += 1
-            print(f"[🔴] {sub}: JWT zəifliyi TƏSDİQLƏNDİ (jwt_tool)")
-        else:
-            res.findings += 1
+        # jwt_tool runs without a target URL here: its text cannot prove
+        # server acceptance. Preserve the observation without promoting status.
+        if out:
+            db.add_evidence(fid, "jwt_tool_observation",
+                            redact(out.replace(tok, "[REDACTED]")), self.ctx.scan_id)
+            res.warn("JWT server acceptance yoxlanmayıb — candidate saxlanıldı")
+        res.findings += 1
 
     async def _run_tool(self, tok: str) -> str:
         from ..adapters.base import run_process

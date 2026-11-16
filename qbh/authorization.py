@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from fnmatch import fnmatchcase
 from urllib.parse import urlsplit, unquote
 from pathlib import PurePath
@@ -25,6 +27,9 @@ from dataclasses import dataclass, field
 
 from .config import ProgramRules
 from .scope import ScopeEnforcer, ScopeError, extract_host, normalize_host
+
+
+_operation: ContextVar = ContextVar("authorization_operation", default=None)
 
 
 class AuthorizationError(ScopeError):
@@ -88,8 +93,12 @@ class Authorization:
         method = method.upper()
         if destructive:
             raise RuleForbidden("destructive_operation")
-        if action:
-            self.require(action)
+        active = _operation.get()
+        actions = {action} if action else set()
+        if active is not None and active[0] is self:
+            actions.add(active[1])
+        for technique in actions:
+            self.require(technique)
         if method not in {"GET", "HEAD", "OPTIONS"}:
             self.require("state_changing")
         host = normalize_host(extract_host(url))
@@ -103,9 +112,22 @@ class Authorization:
                 continue
             if method not in rule["methods"] and "*" not in rule["methods"]:
                 continue
-            if "*" in rule["forbidden"] or (action and action in rule["forbidden"]):
+            if "*" in rule["forbidden"] or actions.intersection(rule["forbidden"]):
                 raise RuleForbidden("explicit_request_restriction")
         return url
+
+    @contextmanager
+    def operation(self, action):
+        """Bind engine identity to every native request, including redirects.
+
+        ContextVar keeps concurrent Scheduler tasks isolated; explicit sub-actions
+        still undergo their own checks at authorize_request().
+        """
+        token = _operation.set((self, action))
+        try:
+            yield
+        finally:
+            _operation.reset(token)
 
     def authorize_host(self, host: str) -> str:
         """Hostu yoxlayır və kanonik hostu qaytarır; kənardırsa xəta."""

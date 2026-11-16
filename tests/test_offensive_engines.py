@@ -230,3 +230,25 @@ class TestReconDeepening:
         from qbh.engines.deepen import GowitnessEngine
 
         assert GowitnessEngine.name == "gowitness"
+
+
+async def test_jwt_tool_text_without_server_proof_stays_candidate(make_ctx, tmp_db, monkeypatch):
+    import base64
+    import json
+    from qbh.engines.jwt import JWTEngine
+    ctx = _ctx(make_ctx)
+    hid = db.upsert_host('127.0.0.1', scan_id=ctx.scan_id)
+    def enc(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
+    token = enc({'alg': 'none'}) + '.' + enc({'sub': 'synthetic'}) + '.signature'
+    engine = JWTEngine(ctx)
+    monkeypatch.setattr(engine, 'tool_present', lambda: True)
+    async def observation(tok):
+        return 'alg:none [+] VULNERABLE accepted ' + tok
+    monkeypatch.setattr(engine, '_run_tool', observation)
+    result = EngineResult(stage='jwt')
+    await engine._analyze(token, hid, '127.0.0.1', result)
+    rows = db.findings_all(ctx.scan_id)
+    assert len(rows) == 1 and rows[0]['status'] == 'candidate'
+    assert token not in '\n'.join(db.get_db().iterdump())
+    assert result.findings == 1 and result.warnings

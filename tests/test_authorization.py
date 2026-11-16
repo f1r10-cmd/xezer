@@ -249,3 +249,15 @@ async def test_operation_identity_applies_per_request_and_is_task_local():
                 auth.authorize_request('GET', 'http://127.0.0.1/private')
     await asyncio.gather(request_as('sqli'), request_as('xss'))
     auth.authorize_request('GET', 'http://127.0.0.1/private')
+
+
+@pytest.mark.parametrize('stage,forbidden', [('js', 'jsanalysis'), ('jsanalysis', 'js'),
+                                          ('hidden_param_detect', 'param_enum')])
+def test_request_restrictions_resolve_existing_engine_aliases(load_config, stage, forbidden):
+    auth = from_config(_scope(load_config, ['127.0.0.1']))
+    auth.request_restrictions = [{'hosts': ['127.0.0.1'], 'paths': ['/private'],
+                                  'methods': ['GET'], 'forbidden': [forbidden]}]
+    with auth.operation(stage):
+        with pytest.raises(RuleForbidden):
+            auth.authorize_request('GET', 'http://127.0.0.1/private')
+        auth.authorize_request('GET', 'http://127.0.0.1/public')

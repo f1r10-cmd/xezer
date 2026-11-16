@@ -30,6 +30,11 @@ from .scope import ScopeEnforcer, ScopeError, extract_host, normalize_host
 
 
 _operation: ContextVar = ContextVar("authorization_operation", default=None)
+_ACTION_ALIASES = {"js": "jsanalysis", "param": "param_enum", "api": "api_enum",
+                   "hidden_param_detect": "param_enum", "param_fuzz": "param_enum",
+                   "schemathesis_fuzz": "api_fuzz", "bypass_matrix": "bypass",
+                   "confirm_template": "confirm"}
+
 
 
 class AuthorizationError(ScopeError):
@@ -112,7 +117,9 @@ class Authorization:
                 continue
             if method not in rule["methods"] and "*" not in rule["methods"]:
                 continue
-            if "*" in rule["forbidden"] or actions.intersection(rule["forbidden"]):
+            denied = {_ACTION_ALIASES.get(name, name) for name in rule["forbidden"]}
+            canonical_actions = {_ACTION_ALIASES.get(name, name) for name in actions}
+            if "*" in denied or canonical_actions.intersection(denied):
                 raise RuleForbidden("explicit_request_restriction")
         return url
 
@@ -159,11 +166,7 @@ class Authorization:
     # ------------------------------------------------------------------- RoE
     def allows(self, action: str) -> bool:
         """Proqram qaydaları hərəkətə icazə verir? (default: bəli)"""
-        aliases = {"js": "jsanalysis", "param": "param_enum", "api": "api_enum",
-                   "hidden_param_detect": "param_enum", "param_fuzz": "param_enum",
-                   "schemathesis_fuzz": "api_fuzz", "bypass_matrix": "bypass",
-                   "confirm_template": "confirm"}
-        if not self.rules.allows(action) or not self.rules.allows(aliases.get(action, action)):
+        if not self.rules.allows(action) or not self.rules.allows(_ACTION_ALIASES.get(action, action)):
             return False
         if action == "active_fuzz" and not self.profile_active_fuzz:
             return False

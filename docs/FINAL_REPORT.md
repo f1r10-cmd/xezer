@@ -1,5 +1,7 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated-section:v1:be59253f4e347fd46507ead7d05e6cf7811ae07d4d64fe345b7ef18a4cb4800c -->
+
 # XEzer — Fazalar 3–8 yekun yoxlama hesabatı
 
 ## Ümumi qərar: PARTIAL — v4.0.0 buraxılmayıb
@@ -156,8 +158,13 @@ Alətin binary probe-u target scan fidelity yoxlaması sayılmır.
 | 7 | 52703fd390b6946baa6f90e603cf0ccd36023672 | [43832823558 — success](https://github.com/f1r10-cmd/xezer/actions/runs/43832823558) |
 | 8 | efc2cca621f04fae3a73f2f257347a7926750bc2 | [43833413796 — success](https://github.com/f1r10-cmd/xezer/actions/runs/43833413796) |
 
-Son release-hardening diff-i üçün uzaq CI nəticəsi push-dan sonra əlavə ediləcək;
-yuxarıdakı tarixi success-lər yeni diff-in CI nəticəsi sayılmır. Yeni matrix:
+Release-hardening commit `26145d78bdb9ab396bfd2229dad3146fc81bd169` üçün
+[GitHub CI 43836101910](https://github.com/f1r10-cmd/xezer/actions/runs/43836101910)
+**completed/success**, bütün 8 job keçib: Python 3.10–3.14, lint, gitleaks, smoke.
+Sonrakı native alias düzəlişi (`js`/`jsanalysis`, `param`/`param_enum`) üçün
+146 məqsədli authorization/HTTP/Conductor/Chain/Brain/E2E testi **7.85s**-də keçib;
+compile və ruff PASS. Əvvəlki full suite-in dəyişməyən hissələri reused.
+Bu əlavə üç regressiya testi əvvəlki 1280 full sayına daxil deyil. Yeni matrix:
 Python 3.10/3.11/3.12/3.13/3.14, compile, coverage≥70%, iki benchmark, ruff,
 gitleaks və loopback smoke. `main`-ə merge istifadəçiyə saxlanır.
 
@@ -177,3 +184,6 @@ gitleaks və loopback smoke. `main`-ə merge istifadəçiyə saxlanır.
 Bu maneələrə görə final commit mesajında “feature-complete/all release gates green”
 yazılmır və v4.0.0 tag-i yaradılmır. Bloklanmayan CLI, sənədlər, lokal validation,
 benchmark qorunması və CI yenilənməsi tamamlanır.
+
+
+<!-- /coderabbit-ai-generated:v1 -->

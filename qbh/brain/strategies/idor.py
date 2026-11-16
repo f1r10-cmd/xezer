@@ -1,4 +1,6 @@
 """Read-only cross-identity observations; confirmation requires later verification."""
+from dataclasses import asdict
+from qbh.brain.diff_engine import DiffEngine
 from qbh.brain.strategy import TestPlan, TestResult
 from qbh.ingest.har_importer import digest
 
@@ -35,7 +37,7 @@ class Strategy:
         runtime = context.runtime
         auth = runtime._auth()
         url = context.request['url']
-        observations = []
+        observations, responses = [], []
         # A fresh session per identity is intentional: prevent cookie-jar cross-talk.
         import aiohttp
         for identity in context.auth_states:
@@ -47,9 +49,12 @@ class Strategy:
             async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
                 response = await runtime.guardian.request(session, context.request.get('method', 'GET'), url,
                                                           headers=headers, allow_redirects=False)
+            responses.append(response)
             observations.append({'identity': identity.name, 'status': response.status,
                                  'body_digest': digest(response.text), 'truncated': response.truncated})
+        comparisons = [asdict(DiffEngine().compare(responses[0], other)) for other in responses[1:]]
         # Similarity is useful evidence but cannot prove unauthorized access.
         return TestResult('inconclusive', 'cross_identity_observations_require_ownership_and_diff_verification',
                           [{'kind': 'identity_comparison', 'observations': observations,
-                            'evidence_refs': list(plan.evidence_refs)}])
+                            'evidence_refs': list(plan.evidence_refs)},
+                           {'kind': 'response_differences', 'comparisons': comparisons}])

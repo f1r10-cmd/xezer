@@ -25,7 +25,7 @@ DB_PATH = os.environ.get("QBH_DB_PATH", "findings.db")
 #:  * v6 → secret vault (`secrets.value_enc`).
 #:  * v7 (Faza 2, §4) → davamlı icra/bərpa cədvəlləri: `task_state`,
 #:    `event_state`, `followup_queue`. Əlavə (additive) — mövcud data qorunur.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 #: Davamlı tapşırıq vəziyyətləri (`task_state.status`) — `tasks.LIFECYCLE` ilə
 #: eyni dəstdir. `db` `tasks`-dan asılı olmasın deyə burada KİMLİK şəkildə
@@ -103,6 +103,23 @@ CREATE TABLE IF NOT EXISTS scans (
   program TEXT, mode TEXT, started_at TEXT, finished_at TEXT,
   status TEXT DEFAULT 'running'
 );
+CREATE TABLE IF NOT EXISTS test_plans (
+  id TEXT PRIMARY KEY, scan_id INTEGER NOT NULL REFERENCES scans(id),
+  request_id INTEGER REFERENCES imported_requests(id), url_id INTEGER REFERENCES urls(id),
+  vuln_class TEXT NOT NULL, prerequisite_hash TEXT NOT NULL,
+  status TEXT NOT NULL, reason TEXT NOT NULL, missing_prerequisites TEXT NOT NULL,
+  evidence_refs TEXT NOT NULL, classifications TEXT NOT NULL,
+  user_decision TEXT NOT NULL DEFAULT 'automatic', decision_reason TEXT NOT NULL DEFAULT '',
+  result_enc BLOB, finding_id INTEGER REFERENCES findings(id),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plans_scan_status ON test_plans(scan_id,status);
+CREATE TABLE IF NOT EXISTS test_plan_events (
+  id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES test_plans(id),
+  status TEXT NOT NULL, reason TEXT NOT NULL, prerequisite_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_events ON test_plan_events(plan_id,id);
 CREATE TABLE IF NOT EXISTS imported_requests (
   id INTEGER PRIMARY KEY,
   scan_id INTEGER NOT NULL REFERENCES scans(id),

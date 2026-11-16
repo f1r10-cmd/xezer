@@ -156,6 +156,12 @@ class EgressController:
         yoxdursa (lokal alət) qapı heç nə etmir. Scope xarici və ya DNS-i
         həll olunmayan hədəf varsa proses bloklanır (fail-closed) + audit.
         """
+        from .authorization import RuleForbidden
+        try:
+            self.auth.require_command(cmd)
+        except RuleForbidden:
+            self.audit.append({"event": "egress_blocked", "reason": "tool_forbidden", "at": time.time()})
+            return ProcResult(-1, stderr=b"egress: tool forbidden by RoE", blocked=True), None
         candidates: list[str] = []
         for raw in list(targets or []):
             if raw:

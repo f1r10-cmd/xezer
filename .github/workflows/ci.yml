@@ -5,7 +5,7 @@ name: CI
 # CI HƏÇ VAXT xarici hədəfə şəbəkə trafiki göndərmir.
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "coderabbit/complete-phases-three-eight/b3af3e33"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:

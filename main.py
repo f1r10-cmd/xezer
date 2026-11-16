@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--import-har", help="HAR faylını offline idxal et")
     p.add_argument("--list-imported", action="store_true")
     p.add_argument("--request-graph", action="store_true")
+    p.add_argument("--test-plan", action="store_true", help="test planları və ilkin şərtləri göstər")
+    decisions = p.add_mutually_exclusive_group()
+    decisions.add_argument("--approve", nargs="?", const="*", metavar="PLAN_ID")
+    decisions.add_argument("--reject", metavar="PLAN_ID")
+    p.add_argument("--reason", default="cli_decision", help="plan qərarının səbəbi")
     return p
 
 
@@ -126,6 +131,41 @@ def _show_pending_followups(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if getattr(args, "test_plan", False):
+        import json
+        from qbh import db
+        from qbh.brain import store
+        from qbh.brain.planner import BrainPlanner
+        from qbh.redact import redact
+        db.init_db()
+        sid = args.scan_id
+        if sid is None:
+            row = db.get_db().execute("SELECT id FROM scans ORDER BY id DESC LIMIT 1").fetchone()
+            sid = row['id'] if row else None
+        if sid is None or db.get_scan(sid) is None:
+            print("[!] Skan tapılmadı")
+            return EXIT_USAGE
+        cfg = Config.load(args.config)
+        conductor = Conductor(cfg, args)
+        conductor.ctx.scan_id = sid
+        try:
+            planner = BrainPlanner(conductor.ctx)
+            rows = planner.prepare_scan()
+            choice = args.approve or args.reject
+            if choice:
+                selected = [r['id'] for r in rows] if choice == '*' and args.approve else [choice]
+                for plan_id in selected:
+                    store.decide(plan_id, sid, approve=bool(args.approve), reason=redact(args.reason))
+                planner.prepare_scan()
+                if args.approve:
+                    await planner.execute_ready()
+            print(json.dumps(store.list_plans(sid), ensure_ascii=False))
+            return EXIT_OK
+        except ValueError:
+            print("[!] Plan və ya plan üçün tələb olunan sübut əlçatan deyil")
+            return EXIT_USAGE
+        finally:
+            await conductor.ctx.aclose()
     if any(getattr(args, flag, False) for flag in ("import_har", "list_imported", "request_graph")):
         import json
         from qbh import db

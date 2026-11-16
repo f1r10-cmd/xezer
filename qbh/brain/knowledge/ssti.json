@@ -1,0 +1,55 @@
+{
+  "vuln_class": "ssti",
+  "preconditions": [
+    {
+      "name": "input_parameter",
+      "required": true
+    },
+    {
+      "name": "bounded_probe",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "search",
+    "api_operations"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Use bounded harmless expressions through the existing template injection engine."
+  ],
+  "expected_behavior": "Input must not be evaluated as a server-side template expression.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Repeatable expression evaluation with negative controls, without command execution."
+  ],
+  "impact": "Server-side template evaluation.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "ssti",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

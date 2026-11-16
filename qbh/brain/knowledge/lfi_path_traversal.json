@@ -1,0 +1,54 @@
+{
+  "vuln_class": "lfi_path_traversal",
+  "preconditions": [
+    {
+      "name": "file_parameter",
+      "required": true
+    },
+    {
+      "name": "synthetic_canary",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "file_upload_download"
+  ],
+  "required_auth_states": [],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Request only designated non-sensitive canary files with paired controls."
+  ],
+  "expected_behavior": "File lookup must stay inside its configured root.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Content of a designated canary outside the allowed logical root is retrieved."
+  ],
+  "impact": "Unauthorized file disclosure.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "lfi_path_traversal",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

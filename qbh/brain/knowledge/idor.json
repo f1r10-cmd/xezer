@@ -1,0 +1,62 @@
+{
+  "vuln_class": "idor",
+  "preconditions": [
+    {
+      "name": "two_distinct_identities",
+      "required": true
+    },
+    {
+      "name": "protected_resource",
+      "required": true
+    },
+    {
+      "name": "ownership_evidence",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "object_access",
+    "user_resources"
+  ],
+  "required_auth_states": [
+    "owner",
+    "non_owner"
+  ],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Compare the same protected object under its owner and a distinct non-owner identity."
+  ],
+  "expected_behavior": "Non-owner must not receive protected owner data.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Distinct authenticated identities, verified ownership, protected fields and repeated unauthorized disclosure."
+  ],
+  "impact": "Cross-user disclosure of protected data.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "idor",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

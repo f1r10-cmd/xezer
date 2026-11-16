@@ -380,7 +380,10 @@ class Conductor:
         print(f"\n[▶] {label}")
         t0 = time.monotonic()
         try:
-            result = await factory()
+            if self.authorization.allows(stage):
+                result = await factory()
+            else:
+                result = EngineResult(stage=stage).skip("authorization: forbidden engine " + stage)
         except asyncio.CancelledError:
             sr.status = "cancelled"
             sr.completed_at = now_iso()
@@ -660,7 +663,11 @@ class Conductor:
 
         pipeline = ChainPipeline(self.ctx)
         self.chain = pipeline
-        return await pipeline.run()
+        result = await pipeline.run()
+        snapshot = result.data.get("brain", {}).get("scheduler") if isinstance(result, EngineResult) else None
+        if snapshot:
+            self._merge_scheduler_totals(snapshot)
+        return result
 
     # ---------------- yekun ----------------
     def generate_report(self) -> str | None:

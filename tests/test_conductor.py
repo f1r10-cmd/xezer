@@ -768,3 +768,19 @@ class TestToolPhase:
         monkeypatch.setattr(conductor_mod, "install_tools", fake_install)
         monkeypatch.setattr(conductor_mod, "format_report", lambda r: "")
         assert await c.install_only() == 1
+
+
+async def test_named_engine_forbidden_is_recorded_without_running(make_conductor):
+    conductor = make_conductor()
+    conductor.authorization.rules.forbidden.add('jwt')
+    called = False
+
+    async def factory():
+        nonlocal called
+        called = True
+        return EngineResult(stage='jwt')
+
+    result = await conductor._run_stage('jwt', '', factory)
+    assert not called
+    assert result.status == 'skipped'
+    assert any('forbidden engine jwt' in reason for reason in result.warnings)

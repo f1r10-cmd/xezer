@@ -206,6 +206,7 @@ class ProgramRules:
     forbidden: set[str] = field(default_factory=set)
     allow_wildcard_expansion: bool = True
     max_requests_per_second: float = 0.0  # 0 → profil/limits default
+    unknown_forbidden: set[str] = field(default_factory=set)
 
     def allows(self, action: str) -> bool:
         return action not in self.forbidden
@@ -286,6 +287,9 @@ class Config:
         profile = cls._resolve_profile(aggressiveness)
 
         program_rules = cls._validate_program_rules(raw.get("program_rules"))
+        if program_rules.unknown_forbidden:
+            warnings.append("naməlum forbidden adları (icazələrə təsir etmir): " +
+                            ", ".join(sorted(program_rules.unknown_forbidden)))
         if not program_rules.allows("active_fuzz") and profile["active_fuzz"]:
             warnings.append(
                 "proqram qaydaları 'active_fuzz'ı qadağan edir — deaktiv edildi")
@@ -387,9 +391,16 @@ class Config:
         if not isinstance(forbidden_raw, list) or not all(
                 isinstance(x, str) for x in forbidden_raw):
             raise ConfigError("program_rules.forbidden mətn siyahısı olmalıdır")
-        unknown = {f.lower() for f in forbidden_raw} - ALL_ACTIONS
+        from pathlib import Path
+        from .brain.strategy import discover
+        from .brain.knowledge_base import load_knowledge
+        from .installer import TOOLS
+        engine_names = {p.stem for p in Path(__file__).with_name('engines').glob('*.py')
+                        if not p.name.startswith('_')}
+        recognized = ALL_ACTIONS | engine_names | set(discover()) | set(load_knowledge()) | {t.name for t in TOOLS}
+        unknown = {f.lower() for f in forbidden_raw} - recognized
         known = {f.lower() for f in forbidden_raw} - unknown
-        pr = ProgramRules(forbidden=known)
+        pr = ProgramRules(forbidden=known, unknown_forbidden=unknown)
         if "allow_wildcard_expansion" in rules:
             val = rules["allow_wildcard_expansion"]
             if not isinstance(val, bool):

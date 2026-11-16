@@ -1,0 +1,62 @@
+{
+  "vuln_class": "bola",
+  "preconditions": [
+    {
+      "name": "two_distinct_identities",
+      "required": true
+    },
+    {
+      "name": "protected_resource",
+      "required": true
+    },
+    {
+      "name": "ownership_evidence",
+      "required": true
+    }
+  ],
+  "relevant_endpoint_types": [
+    "object_access",
+    "api_operations"
+  ],
+  "required_auth_states": [
+    "owner",
+    "non_owner"
+  ],
+  "required_evidence": [
+    "baseline_response",
+    "negative_control",
+    "authorization_decision",
+    "evidence_provenance"
+  ],
+  "safe_test_strategy": [
+    "Compare read-only API object access under owner and non-owner identities."
+  ],
+  "expected_behavior": "Object authorization must hold regardless of supplied identifier.",
+  "potential_false_positives": [
+    {
+      "scenario": "Public, cached, reflected or synthetic content resembles a protected result.",
+      "mitigation": "Verify the resource policy, distinct identities, provenance and negative controls before confirming."
+    }
+  ],
+  "confirmation_criteria": [
+    "Protected object fields exposed to a verified non-owner with policy evidence."
+  ],
+  "impact": "Unauthorized object access across tenants or users.",
+  "safe_poc_constraints": {
+    "methods_allowed": [
+      "GET",
+      "HEAD"
+    ],
+    "data_modification": false,
+    "destructive": false
+  },
+  "dependencies": [],
+  "required_authorization": [
+    "bola",
+    "active_fuzz"
+  ],
+  "_provenance": {
+    "generated_by": "CodeRabbit",
+    "purpose": "XEzer Phase 4 vulnerability knowledge"
+  }
+}

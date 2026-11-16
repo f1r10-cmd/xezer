@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import PurePath
 from dataclasses import dataclass, field
 
 from .config import ProgramRules
@@ -109,7 +110,11 @@ class Authorization:
     # ------------------------------------------------------------------- RoE
     def allows(self, action: str) -> bool:
         """Proqram qaydaları hərəkətə icazə verir? (default: bəli)"""
-        if not self.rules.allows(action):
+        aliases = {"js": "jsanalysis", "param": "param_enum", "api": "api_enum",
+                   "hidden_param_detect": "param_enum", "param_fuzz": "param_enum",
+                   "schemathesis_fuzz": "api_fuzz", "bypass_matrix": "bypass",
+                   "confirm_template": "confirm"}
+        if not self.rules.allows(action) or not self.rules.allows(aliases.get(action, action)):
             return False
         if action == "active_fuzz" and not self.profile_active_fuzz:
             return False
@@ -124,6 +129,22 @@ class Authorization:
         if not self.allows(action):
             raise RuleForbidden(
                 f"proqram qaydaları icazə vermir: {action!r}")
+
+    def require_command(self, command) -> None:
+        """Apply tool RoE at the shared process boundary without inspecting secrets."""
+        args = list(command)
+        if not args:
+            raise RuleForbidden("empty_command")
+        if PurePath(args[0]).name == "firejail":
+            args = next((args[i:] for i in range(1, len(args)) if not args[i].startswith("-")), [])
+        if not args:
+            raise RuleForbidden("empty_command")
+        binary = PurePath(args[0]).name
+        self.require(binary)
+        if binary.startswith("python") or binary in {"bash", "sh", "node", "ruby"}:
+            script = next((arg for arg in args[1:] if not arg.startswith("-")), "")
+            if script:
+                self.require(PurePath(script).stem)
 
     # ---------------------------------------------------------- ləğv / vaxt
     def cancel(self) -> None:

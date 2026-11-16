@@ -88,11 +88,11 @@ class TestSchemaPhase2:
         assert {"task_state", "event_state", "followup_queue"} <= names
 
     def test_schema_version_bumped(self, durable_db):
-        assert db.SCHEMA_VERSION == 8
+        assert db.SCHEMA_VERSION == 9
         row = db.get_db().execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
-        assert row[0] == "8"
+        assert row[0] == "9"
 
     def test_new_indexes_present(self, durable_db):
         idx = {r[0] for r in db.get_db().execute(

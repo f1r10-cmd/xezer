@@ -295,6 +295,9 @@ class ChainPipeline:
         Qaytarır: kimlik sətri (icra et) və ya `None` (artıq edilib → atla).
         `task_ledger` yoxdursa `""` qaytarır — yəni qapı YOXDUR (köhnə davranış).
         """
+        if not self.auth.allows(test_type):
+            self.skipped.append(f"{test_type} (authorization: forbidden engine/action)")
+            return None
         if self.task_ledger is None:
             return ""
         identity = task_identity(self.store.scan_id, engine,
@@ -689,8 +692,15 @@ class ChainPipeline:
         # `self.executed` faktiki vəziyyəti əks etdirsin.
         await self._dispatch_followups()
 
+        from .brain.planner import BrainPlanner
+        brain = await BrainPlanner(self.ctx).run(budget=max(0, self.cfg_chain.max_tasks - self._tasks))
+        res.findings += brain.findings
+        res.warnings += brain.warnings
+        if brain.partial:
+            res.partial = True
         self._sync_chain_metrics()
         res.data = {
+            "brain": brain.data,
             "events": len(self.events),
             "executed": sorted(set(self.executed)),
             "delegated": sorted(set(self.delegated)),
